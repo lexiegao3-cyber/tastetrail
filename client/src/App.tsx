@@ -1,6 +1,8 @@
-import { useCallback, useEffect, useState } from "react";
+import { MotionConfig } from "motion/react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { api, formatMinutes, pretty, type Book, type Preferences, type Recommendation } from "./api";
-import { BookCard } from "./components/BookCard";
+import { BookDetail } from "./components/BookDetail";
+import { Shelf } from "./components/Shelf";
 
 type Tab = "discover" | "shelf" | "browse";
 
@@ -21,30 +23,55 @@ export default function App() {
       .finally(() => setReady(true));
   }, []);
 
-  if (!ready) return null;
-  if (!email || !prefs)
-    return (
-      <Login
-        onDone={async (e) => {
-          const m = await api.me();
-          setPrefs(m.preferences);
-          setEmail(e);
-        }}
-      />
-    );
-  return <Home email={email} initialPrefs={prefs} onLogout={() => { api.logout(); setEmail(null); }} />;
+  return (
+    <MotionConfig reducedMotion="user">
+      {!ready ? null : !email || !prefs ? (
+        <Landing
+          onDone={async (e) => {
+            const m = await api.me();
+            setPrefs(m.preferences);
+            setEmail(e);
+          }}
+        />
+      ) : (
+        <Home email={email} initialPrefs={prefs} onLogout={() => { api.logout(); setEmail(null); }} />
+      )}
+    </MotionConfig>
+  );
 }
 
-function Login({ onDone }: { onDone: (email: string) => Promise<void> }) {
+const LANDING_PICKS = ["earthsea", "hail-mary", "piranesi", "roger-ackroyd", "educated", "dune", "murderbot", "remains-day", "circe", "mans-search", "three-body", "big-sleep"];
+
+function Landing({ onDone }: { onDone: (email: string) => Promise<void> }) {
   const [mode, setMode] = useState<"login" | "register">("register");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
+  const [books, setBooks] = useState<Book[]>([]);
+
+  useEffect(() => {
+    api.books("", "").then((r) => {
+      const byId = new Map(r.items.map((b) => [b.id, b]));
+      setBooks(LANDING_PICKS.map((id) => byId.get(id)).filter((b): b is Book => !!b));
+    });
+  }, []);
+
   return (
-    <div className="login">
-      <h1>TasteTrail</h1>
-      <p>Book picks that fit your taste and the time you actually have.</p>
+    <div className="landing">
+      <header className="landing-head">
+        <span className="wordmark">TasteTrail</span>
+      </header>
+      <section className="landing-hero">
+        <h1>Books that fit the evening you actually have.</h1>
+        <p className="lede">
+          Tell TasteTrail what you like and how long you have to read. Every pick says why it was chosen, and the
+          shelf learns from what you keep.
+        </p>
+      </section>
+      {books.length > 0 && <Shelf books={books} entrance label="A sample shelf" />}
+      <p className="shelf-legend">Spine width shows reading time: the thin ones are an afternoon, the wide ones a fortnight.</p>
       <form
+        className="auth"
         onSubmit={async (e) => {
           e.preventDefault();
           setError("");
@@ -55,19 +82,27 @@ function Login({ onDone }: { onDone: (email: string) => Promise<void> }) {
           }
         }}
       >
-        <input type="email" placeholder="Email" required value={email} onChange={(e) => setEmail(e.target.value)} />
-        <input type="password" placeholder="Password (8+ characters)" minLength={8} required value={password} onChange={(e) => setPassword(e.target.value)} />
-        {error && <p className="error">{error}</p>}
-        <button>{mode === "register" ? "Create account" : "Sign in"}</button>
+        <label>Email<input type="email" autoComplete="email" required value={email} onChange={(e) => setEmail(e.target.value)} /></label>
+        <label>Password<input type="password" autoComplete={mode === "register" ? "new-password" : "current-password"} minLength={8} required value={password} onChange={(e) => setPassword(e.target.value)} /></label>
+        <button className="primary">{mode === "register" ? "Start my shelf" : "Sign in"}</button>
+        <button type="button" className="quiet" onClick={() => setMode(mode === "register" ? "login" : "register")}>
+          {mode === "register" ? "I already have an account" : "Create a new account"}
+        </button>
+        {error && <p className="error" role="alert">{error}</p>}
       </form>
-      <button className="ghost" onClick={() => setMode(mode === "register" ? "login" : "register")}>
-        {mode === "register" ? "I already have an account" : "Create a new account"}
-      </button>
     </div>
   );
 }
 
 const BUDGETS = [null, 120, 240, 480, 720, 1200];
+
+function describe(p: Preferences): string {
+  const parts: string[] = [];
+  parts.push(p.genres.length ? p.genres.map(pretty).join(", ") : "any genre");
+  if (p.moods.length) parts.push(`feeling ${p.moods.join(" or ")}`);
+  if (p.budgetMinutes) parts.push(`under ${formatMinutes(p.budgetMinutes)}`);
+  return parts.join(", ");
+}
 
 function Home({ email, initialPrefs, onLogout }: { email: string; initialPrefs: Preferences; onLogout: () => void }) {
   const [tab, setTab] = useState<Tab>("discover");
@@ -76,13 +111,15 @@ function Home({ email, initialPrefs, onLogout }: { email: string; initialPrefs: 
   const [diversity, setDiversity] = useState(0.25);
   const [recs, setRecs] = useState<Recommendation[]>([]);
   const [shelf, setShelf] = useState<Book[]>([]);
+  const [selected, setSelected] = useState<string | null>(null);
   const [error, setError] = useState("");
 
   const loadShelf = useCallback(async () => setShelf((await api.shelf()).items.map((i) => i.book)), []);
-
   const loadRecs = useCallback(async () => {
     try {
-      setRecs((await api.recommend({ ...prefs, diversity, limit: 8 })).items);
+      const items = (await api.recommend({ ...prefs, diversity, limit: 10 })).items;
+      setRecs(items);
+      setSelected((cur) => (cur && items.some((r) => r.book.id === cur) ? cur : items[0]?.book.id ?? null));
       setError("");
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -94,7 +131,6 @@ function Home({ email, initialPrefs, onLogout }: { email: string; initialPrefs: 
     loadShelf();
   }, [loadShelf]);
 
-  // Recompute as preferences change, and persist them (debounced).
   useEffect(() => {
     const t = setTimeout(() => {
       loadRecs();
@@ -106,6 +142,8 @@ function Home({ email, initialPrefs, onLogout }: { email: string; initialPrefs: 
   const toggle = (key: "genres" | "moods", value: string) =>
     setPrefs((p) => ({ ...p, [key]: p[key].includes(value) ? p[key].filter((x) => x !== value) : [...p[key], value] }));
 
+  const current = useMemo(() => recs.find((r) => r.book.id === selected) ?? null, [recs, selected]);
+
   async function save(id: string) {
     await api.save(id);
     await Promise.all([loadShelf(), loadRecs()]);
@@ -114,82 +152,109 @@ function Home({ email, initialPrefs, onLogout }: { email: string; initialPrefs: 
   return (
     <div className="app">
       <nav>
-        <strong className="logo">TasteTrail</strong>
-        {(["discover", "shelf", "browse"] as Tab[]).map((t) => (
-          <button key={t} className={tab === t ? "nav on" : "nav"} onClick={() => setTab(t)}>
-            {t === "shelf" ? `My shelf (${shelf.length})` : t[0].toUpperCase() + t.slice(1)}
-          </button>
-        ))}
-        <span className="spacer" />
+        <span className="wordmark">TasteTrail</span>
+        <div className="tabs" role="tablist">
+          {(["discover", "shelf", "browse"] as Tab[]).map((t) => (
+            <button key={t} role="tab" aria-selected={tab === t} className={tab === t ? "tab on" : "tab"} onClick={() => setTab(t)}>
+              {t === "discover" ? "Picks for you" : t === "shelf" ? `Saved (${shelf.length})` : "Whole catalog"}
+            </button>
+          ))}
+        </div>
         <span className="who">{email}</span>
-        <button className="ghost" onClick={onLogout}>Sign out</button>
+        <button className="quiet" onClick={onLogout}>Sign out</button>
       </nav>
 
       {tab === "discover" && (
-        <div className="discover">
-          <section className="prefs">
-            <h2>Your taste</h2>
-            <h4>Genres</h4>
-            <div className="chips">
-              {meta.genres.map((g) => (
-                <button key={g} className={prefs.genres.includes(g) ? "chip on" : "chip"} onClick={() => toggle("genres", g)}>{pretty(g)}</button>
-              ))}
-            </div>
-            <h4>Mood</h4>
-            <div className="chips">
-              {meta.moods.map((m) => (
-                <button key={m} className={prefs.moods.includes(m) ? "chip mood on" : "chip mood"} onClick={() => toggle("moods", m)}>{m}</button>
-              ))}
-            </div>
-            <h4>Time to read</h4>
-            <div className="chips">
-              {BUDGETS.map((b) => (
-                <button key={String(b)} className={prefs.budgetMinutes === b ? "chip on" : "chip"} onClick={() => setPrefs({ ...prefs, budgetMinutes: b })}>
-                  {b === null ? "Any" : `≤ ${formatMinutes(b)}`}
-                </button>
-              ))}
-            </div>
-            <label>
-              Reading speed: {prefs.wordsPerMinute} wpm
-              <input type="range" min={100} max={600} step={25} value={prefs.wordsPerMinute} onChange={(e) => setPrefs({ ...prefs, wordsPerMinute: Number(e.target.value) })} />
-            </label>
-            <label>
-              Variety: {diversity < 0.15 ? "focused" : diversity < 0.4 ? "balanced" : "exploratory"}
-              <input type="range" min={0} max={0.6} step={0.05} value={diversity} onChange={(e) => setDiversity(Number(e.target.value))} />
-            </label>
-          </section>
-          <section className="results">
+        <>
+          <section className="shelf-band">
+            <p className="for">Picks for {describe(prefs)}</p>
+            {recs.length > 0 ? (
+              <Shelf books={recs.map((r) => r.book)} selectedId={selected} onSelect={(b) => setSelected(b.id)} label="Recommended books, best match first" />
+            ) : (
+              <p className="empty">Nothing on the catalog fits all of that. Try a longer time budget or one more genre.</p>
+            )}
             {error && <p className="error">{error}</p>}
-            {recs.length === 0 && <p className="empty">Nothing fits those filters yet — try a longer time budget or another genre.</p>}
-            {recs.map((r) => (
-              <BookCard
-                key={r.book.id}
-                book={r.book}
-                reasons={r.reasons}
-                score={r.score}
-                actions={
-                  <>
-                    <button onClick={() => save(r.book.id)}>Save</button>
-                    <button className="ghost" onClick={async () => { await api.dismiss(r.book.id); await loadRecs(); }}>Not for me</button>
-                  </>
-                }
-              />
-            ))}
           </section>
-        </div>
+          <div className="below">
+            <section className="taste">
+              <h2>Your taste</h2>
+              <fieldset>
+                <legend>Genres</legend>
+                <div className="chips">
+                  {meta.genres.map((g) => (
+                    <button key={g} aria-pressed={prefs.genres.includes(g)} className="chip" onClick={() => toggle("genres", g)}>{pretty(g)}</button>
+                  ))}
+                </div>
+              </fieldset>
+              <fieldset>
+                <legend>Mood</legend>
+                <div className="chips">
+                  {meta.moods.map((m) => (
+                    <button key={m} aria-pressed={prefs.moods.includes(m)} className="chip" onClick={() => toggle("moods", m)}>{m}</button>
+                  ))}
+                </div>
+              </fieldset>
+              <fieldset>
+                <legend>Time to finish it</legend>
+                <div className="chips">
+                  {BUDGETS.map((b) => (
+                    <button key={String(b)} aria-pressed={prefs.budgetMinutes === b} className="chip" onClick={() => setPrefs({ ...prefs, budgetMinutes: b })}>
+                      {b === null ? "No limit" : `Up to ${formatMinutes(b)}`}
+                    </button>
+                  ))}
+                </div>
+              </fieldset>
+              <label className="slider">
+                <span>Reading speed <b>{prefs.wordsPerMinute} words a minute</b></span>
+                <input type="range" min={100} max={600} step={25} value={prefs.wordsPerMinute} onChange={(e) => setPrefs({ ...prefs, wordsPerMinute: Number(e.target.value) })} />
+              </label>
+              <label className="slider">
+                <span>Variety <b>{diversity < 0.15 ? "close to my taste" : diversity < 0.4 ? "a little mixed" : "surprise me"}</b></span>
+                <input type="range" min={0} max={0.6} step={0.05} value={diversity} onChange={(e) => setDiversity(Number(e.target.value))} />
+              </label>
+            </section>
+            <BookDetail
+              book={current?.book ?? null}
+              reasons={current?.reasons}
+              score={current?.score}
+              empty={<p>Pick a spine on the shelf to see why it was chosen.</p>}
+              actions={
+                current && (
+                  <>
+                    <button className="primary" onClick={() => save(current.book.id)}>Save to my shelf</button>
+                    <button className="quiet" onClick={async () => { await api.dismiss(current.book.id); await loadRecs(); }}>Not for me</button>
+                  </>
+                )
+              }
+            />
+          </div>
+        </>
       )}
 
-      {tab === "shelf" && (
-        <section className="results wide">
-          {shelf.length === 0 && <p className="empty">Saved books appear here and make future picks more personal.</p>}
-          {shelf.map((b) => (
-            <BookCard key={b.id} book={b} actions={<button className="ghost" onClick={async () => { await api.unsave(b.id); await Promise.all([loadShelf(), loadRecs()]); }}>Remove</button>} />
-          ))}
-        </section>
-      )}
-
+      {tab === "shelf" && <SavedShelf shelf={shelf} onRemove={async (id) => { await api.unsave(id); await Promise.all([loadShelf(), loadRecs()]); }} />}
       {tab === "browse" && <Browse genres={meta.genres} shelfIds={new Set(shelf.map((b) => b.id))} onSave={save} />}
     </div>
+  );
+}
+
+function SavedShelf({ shelf, onRemove }: { shelf: Book[]; onRemove: (id: string) => Promise<void> }) {
+  const [selected, setSelected] = useState<string | null>(shelf[0]?.id ?? null);
+  const book = shelf.find((b) => b.id === selected) ?? null;
+  const total = shelf.reduce((s, b) => s + b.readingMinutes, 0);
+  return (
+    <>
+      <section className="shelf-band">
+        <p className="for">{shelf.length ? `Saved for later, about ${formatMinutes(total)} of reading` : "Nothing saved yet"}</p>
+        {shelf.length > 0 && <Shelf books={shelf} selectedId={selected} onSelect={(b) => setSelected(b.id)} label="Saved books" />}
+      </section>
+      <div className="below single">
+        <BookDetail
+          book={book}
+          empty={<p>Books you save land here, and they make your next picks more personal.</p>}
+          actions={book && <button className="quiet" onClick={() => onRemove(book.id)}>Remove from shelf</button>}
+        />
+      </div>
+    </>
   );
 }
 
@@ -202,17 +267,30 @@ function Browse({ genres, shelfIds, onSave }: { genres: string[]; shelfIds: Set<
     return () => clearTimeout(t);
   }, [q, genre]);
   return (
-    <section className="results wide">
+    <section className="catalog">
       <div className="filters">
-        <input placeholder="Search title or author" value={q} onChange={(e) => setQ(e.target.value)} />
-        <select value={genre} onChange={(e) => setGenre(e.target.value)}>
+        <input aria-label="Search title or author" placeholder="Search title or author" value={q} onChange={(e) => setQ(e.target.value)} />
+        <select aria-label="Genre" value={genre} onChange={(e) => setGenre(e.target.value)}>
           <option value="">All genres</option>
           {genres.map((g) => <option key={g} value={g}>{pretty(g)}</option>)}
         </select>
       </div>
-      {books.map((b) => (
-        <BookCard key={b.id} book={b} actions={shelfIds.has(b.id) ? <span className="saved">On your shelf</span> : <button onClick={() => onSave(b.id)}>Save</button>} />
-      ))}
+      <table>
+        <thead>
+          <tr><th>Title</th><th>Author</th><th>Reading time</th><th>Genres</th><th /></tr>
+        </thead>
+        <tbody>
+          {books.map((b) => (
+            <tr key={b.id}>
+              <td><span className={`swatch g-${b.genres[0]}`} />{b.title}</td>
+              <td>{b.author}</td>
+              <td>{formatMinutes(b.readingMinutes)}</td>
+              <td>{b.genres.map(pretty).join(", ")}</td>
+              <td>{shelfIds.has(b.id) ? <span className="saved">Saved</span> : <button className="quiet" onClick={() => onSave(b.id)}>Save</button>}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </section>
   );
 }

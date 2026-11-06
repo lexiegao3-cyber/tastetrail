@@ -4,7 +4,19 @@ Personalized book discovery with an explainable, deterministic ranking engine. P
 and how much reading time you actually have; TasteTrail ranks a 42-book catalog server-side, tells
 you *why* each book was chosen, and learns from what you save or dismiss.
 
-![Discover](docs/discover.png)
+![Landing](docs/landing.png)
+![Picks for you](docs/discover.png)
+
+## Interface
+
+Recommendations are shown as a bookshelf. Each spine's width is the book's reading time at your pace, its
+colour is its main genre, and the best match stands first. Changing a genre, mood or time budget re-ranks the
+shelf in place: books that no longer fit drop away, new ones slot in, and the rest slide to their new rank
+(FLIP layout animation with Motion for React), which makes the effect of each preference visible. Selecting a
+spine shows the reasons behind the pick, each with a bar sized by its contribution to the score. Type is
+Bricolage Grotesque with Literata for prose (both SIL OFL). Reduced-motion preferences are respected.
+
+![Re-ranking the shelf](docs/reshelve.png)
 
 ## Ranking engine (`server/src/ranking`)
 
@@ -31,7 +43,7 @@ Each eligible book is scored on independent components, then re-ranked for varie
 ## Architecture
 
 ```
-client/   React 19 + TypeScript + Vite
+client/   React 19 + TypeScript + Vite + Motion
 server/   Node.js + TypeScript + Express 5
   ├── app.ts          routes, Zod request validation, error mapping
   ├── auth.ts         bcrypt hashing, JWT (jose) bearer middleware

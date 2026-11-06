@@ -1,0 +1,49 @@
+:root { --ink:#2b2420; --paper:#fbf7f1; --card:#fff; --muted:#8a7f74; --line:#ece4d8; --accent:#b4532a; --sage:#5b7b5a;
+  font-family: "Source Serif 4", Georgia, serif; color: var(--ink); background: var(--paper); }
+* { box-sizing: border-box; }
+body { margin: 0; }
+button { font: 14px system-ui, sans-serif; border: 1px solid var(--accent); background: var(--accent); color: #fff; padding: 7px 14px; border-radius: 999px; cursor: pointer; }
+button.ghost { background: transparent; color: var(--accent); }
+input, select { font: 14px system-ui, sans-serif; padding: 9px 12px; border: 1px solid var(--line); border-radius: 8px; background: #fff; }
+.error { color: #b42318; font-family: system-ui; font-size: 14px; }
+.empty { color: var(--muted); font-style: italic; }
+.login { max-width: 380px; margin: 14vh auto; text-align: center; }
+.login h1 { font-size: 44px; margin-bottom: 4px; }
+.login p { color: var(--muted); }
+.login form { display: flex; flex-direction: column; gap: 10px; margin: 24px 0 12px; }
+nav { display: flex; align-items: center; gap: 8px; padding: 14px 28px; border-bottom: 1px solid var(--line); background: #fff; position: sticky; top: 0; z-index: 2; }
+.logo { font-size: 22px; margin-right: 16px; }
+.nav { background: transparent; color: var(--ink); border-color: transparent; }
+.nav.on { background: var(--ink); color: #fff; }
+.spacer { flex: 1; }
+.who { font: 13px system-ui; color: var(--muted); }
+.discover { display: grid; grid-template-columns: 320px 1fr; gap: 28px; padding: 24px 28px; }
+.prefs { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 18px; align-self: start; position: sticky; top: 80px; }
+.prefs h2 { margin-top: 0; } .prefs h4 { margin: 16px 0 8px; font: 600 12px system-ui; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+.prefs label { display: flex; flex-direction: column; gap: 6px; font: 13px system-ui; margin-top: 16px; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip { font: 12px system-ui; padding: 4px 10px; border-radius: 999px; background: #f4ede3; color: var(--ink); border: 1px solid transparent; text-transform: capitalize; }
+button.chip { cursor: pointer; } .chip.on { background: var(--ink); color: #fff; }
+.chip.mood { background: #e9f0e8; } .chip.mood.on { background: var(--sage); color: #fff; }
+.results { display: flex; flex-direction: column; gap: 14px; }
+.results.wide { padding: 24px 28px; max-width: 980px; }
+.filters { display: flex; gap: 10px; }
+.card { display: grid; grid-template-columns: 70px 1fr; background: var(--card); border: 1px solid var(--line); border-radius: 14px; overflow: hidden; }
+.spine { writing-mode: vertical-rl; transform: rotate(180deg); display: flex; align-items: center; justify-content: center; color: #fff; font-size: 13px; padding: 12px 0; background: #7a6a5c; letter-spacing: .03em; }
+.spine span { max-height: 180px; overflow: hidden; }
+.spine[data-genre="science-fiction"] { background: #33507a; } .spine[data-genre="fantasy"] { background: #5d4a8a; }
+.spine[data-genre="mystery"], .spine[data-genre="thriller"] { background: #3d3d3d; } .spine[data-genre="horror"] { background: #6b2121; }
+.spine[data-genre="historical"] { background: #8a6a3b; } .spine[data-genre="romance"] { background: #b5576d; }
+.spine[data-genre="nonfiction"], .spine[data-genre="memoir"] { background: var(--sage); } .spine[data-genre="literary"] { background: var(--accent); }
+.spine[data-genre="philosophy"] { background: #4b5b62; }
+.card-body { padding: 16px 20px; display: flex; flex-direction: column; gap: 8px; }
+.card h3 { margin: 0; font-size: 20px; }
+.byline { margin: 2px 0 0; font: 13px system-ui; color: var(--muted); }
+.blurb { margin: 0; }
+.reasons { list-style: none; padding: 10px 12px; margin: 0; background: #fbf4ea; border-radius: 10px; font: 13px system-ui; display: flex; flex-direction: column; gap: 4px; }
+.icon { display: inline-block; width: 18px; color: var(--accent); }
+.card footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 4px; }
+.actions { display: flex; gap: 8px; margin-left: auto; }
+.match { position: relative; font: 600 12px system-ui; color: var(--sage); width: 160px; padding-top: 8px; }
+.match .bar { position: absolute; top: 0; left: 0; height: 4px; border-radius: 4px; background: var(--sage); }
+.saved { font: 13px system-ui; color: var(--sage); }

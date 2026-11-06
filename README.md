@@ -1,94 +1,78 @@
 # TasteTrail
 
-A full-stack personalized book discovery application with explainable content-based ranking.
+Personalized book discovery with an explainable, deterministic ranking engine. Pick genres, a mood
+and how much reading time you actually have; TasteTrail ranks a 42-book catalog server-side, tells
+you *why* each book was chosen, and learns from what you save or dismiss.
 
-**Status:** deployed portfolio MVP. The feature list below describes the current implementation; planned capabilities are listed separately.
+![Discover](docs/discover.png)
 
-## Features
+## Ranking engine (`server/src/ranking`)
 
-- Explore a curated nine-book demonstration catalog.
-- Select preferred genres and an approximate reading-time budget.
-- Request server-side recommendations with readable matching reasons.
-- Save and remove books from an authenticated personal shelf.
-- Persist saved books across sessions and exclude saved items from fresh recommendations.
-- Test ranking behavior with the built-in Node.js test runner.
+Each eligible book is scored on independent components, then re-ranked for variety:
 
-## Technology stack
+| Component | Weight | How it's computed |
+| --- | --- | --- |
+| Genre match | 0.45 | IDF-weighted share of the book's genres the user selected (rare genres count more) |
+| Reading-time fit | 0.20 | `pages × 275 / wpm` vs. budget; full score within budget, Gaussian decay above it, hard cut at 2× |
+| Mood match | 0.15 | Fraction of selected moods the book carries |
+| Shelf similarity | 0.15 | Max cosine similarity (TF-IDF over genres, moods, author) to books the user saved |
+| Popularity prior | 0.05 | Weak tie-breaker |
 
-| Layer | Technology |
-| --- | --- |
-| User interface | React 19, TypeScript, CSS |
-| Application framework | Vinext with Next.js-compatible app routes |
-| Server runtime | Cloudflare Workers |
-| Persistence | Cloudflare D1 / SQLite; Drizzle schema migrations |
-| Identity | Sites-provided Sign in with ChatGPT |
-| Development | Node.js 22.13 or later, npm, TypeScript |
-
-Node.js is used for development and testing. The deployed server runs in Cloudflare Workers, not an Express server.
+- **Adaptive weighting:** components the user didn't express a preference for are dropped and the rest
+  renormalised, so leaving the time budget empty doesn't penalise anything.
+- **Diversity:** greedy Maximal Marginal Relevance, `λ·relevance − (1−λ)·max similarity to already-picked`,
+  exposed in the UI as a "variety" slider.
+- **Explanations** are generated from each component's actual contribution and sorted by it
+  ("Matches your fantasy preference", "About 3.4 h to read, within your 8 h budget",
+  "Similar to *Mistborn* on your shelf").
+- **Deterministic:** pure function of its input; scores are rounded before comparison and ties break
+  on book id, so results are identical regardless of catalog order (tested).
 
 ## Architecture
 
-```text
-React interface -> /api/data -> authenticated server handlers -> Cloudflare D1
+```
+client/   React 19 + TypeScript + Vite
+server/   Node.js + TypeScript + Express 5
+  ├── app.ts          routes, Zod request validation, error mapping
+  ├── auth.ts         bcrypt hashing, JWT (jose) bearer middleware
+  ├── repository.ts   data access via Drizzle ORM; every user query keyed by userId
+  ├── db/             SQLite (better-sqlite3), versioned transactional migrations, catalog upsert seeding
+  └── ranking/        feature vectors + recommender (no I/O; unit-tested in isolation)
 ```
 
-The server derives user identity from trusted platform-provided authentication headers rather than a client-supplied user ID. Records use parameterized SQL. User-owned writes are scoped to the signed-in user.
+**Data model:** `users`, `books`, `preferences` (one row per user, upserted), `shelf_items` and
+`dismissals` with composite primary keys `(user_id, book_id)`, which make "save" idempotent at the
+database level (`INSERT … ON CONFLICT DO NOTHING`). Saving a book clears an earlier dismissal.
+
+### API
+
+| Method | Path | Notes |
+| --- | --- | --- |
+| POST | `/api/auth/register`, `/api/auth/login` | returns JWT |
+| GET | `/api/me` | profile + saved preferences |
+| GET / PUT | `/api/preferences` | validated genres, moods, budget, reading speed |
+| POST | `/api/recommendations` | per-request overrides fall back to saved preferences |
+| GET / POST / DELETE | `/api/shelf`, `/api/shelf/:bookId` | 201 on first save, 200 on repeat |
+| POST / DELETE | `/api/dismissals`, `/api/dismissals/:bookId` | "not for me" feedback |
+| GET | `/api/books`, `/api/meta` | public catalog with search / genre / time filters |
 
 ## Run locally
 
-Prerequisites: Node.js 22.13+ and npm.
-
-```sh
-git clone https://github.com/lexiegao3-cyber/tastetrail.git
-cd tastetrail
-npm ci
-npm run build
-npm run db:migrate:local
-npm run dev
+```bash
+cd server && npm install && npm run dev      # http://localhost:3001
+cd client && npm install && npm run dev      # http://localhost:5173 (proxies /api)
 ```
 
-Open the local URL printed by the development server, then use **Sign in with ChatGPT**. The portable development profile simulates a local test identity; it is not a production authentication system. The generated build configuration is required by the database migration command.
+Environment: `TASTETRAIL_JWT_SECRET` (required in production), `TASTETRAIL_DB` (SQLite file path),
+`PORT`.
 
-Local data is stored under the ignored `.wrangler/` directory. Do not commit databases, credentials, or local environment files.
+## Tests
 
-## Verification
-
-```sh
-npm run typecheck
-npm test
-npm run build
+```bash
+cd server && npm test
 ```
 
-Type checking and builds passed for the original MVP. Browser checks covered authenticated database-backed interactions. This is not a security audit or load-test certification.
-
-## API
-
-- `GET /api/data`: load application records for the current interface and identity.
-- `POST /api/data`: submit a validated application action.
-
-Handlers live in `app/api/data/route.ts`. Business logic, where separated, lives in `app/rank.mjs` or `app/analysis.mjs`. API error responses use an `error` field.
-
-## Repository structure
-
-```text
-app/                 React pages, application logic, and API handlers
-db/schema.ts         Database schema
-drizzle/             Versioned SQL migrations
-scripts/             Framework and local runtime helpers
-worker/              Production Worker entry point
-.openai/hosting.json Hosting binding declarations, without an existing Site ID
-```
-
-## Deployment
-
-The existing MVP is hosted privately through Sites; its URL requires owner access and is not an anonymous public demo. A GitHub upload does not deploy this application or grant access to that private Site.
-
-To deploy a new instance, register a new Site, retain the declared D1 binding, build the application, and publish using the Sites workflow. `.openai/hosting.json` intentionally omits the original project's Site ID. Deploying outside Sites requires replacing its authentication integration and configuring the hosting bindings.
-
-## Limitations
-
-The catalog and estimated reading durations are curated demonstration data. Recommendations use genre overlap and reading-time fit, not collaborative filtering or a trained model. There is no large-scale dataset, measured production latency, or claim of recommendation-quality improvement.
-
-## Attribution
-
-The application uses the Sites Vinext starter and third-party dependencies. Vendored components retain their bundled license notices, including the notices under `vendor/` and `scripts/vite/`. No competition awards, adoption statistics, or performance claims are borrowed from another applicant's projects.
+14 Vitest tests: determinism across catalog orderings, genre filtering, saved/dismissed exclusion,
+shelf-based personalisation, budget handling, MMR diversity, explanation ordering, reading-time maths,
+and Supertest API tests for auth, field-level validation errors, preference persistence, idempotent
+shelf writes and per-user isolation. CI also type-checks the server and builds the client.

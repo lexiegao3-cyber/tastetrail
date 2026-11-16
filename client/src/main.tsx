@@ -1,12 +1,14 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import App from "./App";
-import "@fontsource-variable/bricolage-grotesque/standard.css";
-import "@fontsource-variable/literata/standard.css";
+import { I18nProvider } from "./i18n";
+import "@fontsource-variable/outfit";
 import "./styles.css";
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
-    <App />
+    <I18nProvider>
+      <App />
+    </I18nProvider>
   </StrictMode>,
 );

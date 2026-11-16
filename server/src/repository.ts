@@ -174,8 +174,8 @@ export class Repository {
    * between the user's saved/cooked recipes and every other recipe, using
    * imported ratings (≥ 4 stars) plus other users' saves and cooks.
    */
-  async itemSimilarity(userId: number): Promise<Map<string, { sim: number; seed: string }>> {
-    const rows = await this.db.query<{ cand: string; seed: string; sim: number }>(
+  async itemSimilarity(userId: number): Promise<Map<string, { sim: number; seed: string; en: string; zh: string }>> {
+    const rows = await this.db.query<{ cand: string; seed: string; sim: number; en: string; zh: string }>(
       `WITH likes AS (
          SELECT user_key, recipe_id FROM external_ratings WHERE rating >= 4
          UNION
@@ -190,14 +190,15 @@ export class Repository {
           WHERE a.recipe_id IN (SELECT recipe_id FROM mine)
           GROUP BY 1, 2
        )
-       SELECT DISTINCT ON (co.cand) co.cand, co.seed, (co.n / sqrt(da.d * db.d))::float8 AS sim
+       SELECT DISTINCT ON (co.cand) co.cand, co.seed, s.title_en AS en, s.title_zh AS zh, (co.n / sqrt(da.d * db.d))::float8 AS sim
          FROM co
+         JOIN recipes s ON s.id = co.seed
          JOIN deg da ON da.recipe_id = co.seed
          JOIN deg db ON db.recipe_id = co.cand
         ORDER BY co.cand, sim DESC`,
       [userId],
     );
-    return new Map(rows.map((r) => [r.cand, { sim: r.sim, seed: r.seed }]));
+    return new Map(rows.map((r) => [r.cand, { sim: r.sim, seed: r.seed, en: r.en, zh: r.zh }]));
   }
 
   async history(userId: number): Promise<HistoryItem[]> {

@@ -1,37 +1,171 @@
-export interface Book {
+export interface Nutrition {
+  kcal: number;
+  protein: number;
+  carbs: number;
+  fat: number;
+  sugar: number;
+  sodiumMg: number;
+}
+
+export interface Recipe {
   id: string;
-  title: string;
-  author: string;
-  year: number;
-  pages: number;
-  genres: string[];
-  moods: string[];
-  blurb: string;
-  readingMinutes: number;
+  title: { en: string; zh: string };
+  emoji: string;
+  cuisine: string;
+  tags: string[];
+  minutes: number;
+  steps?: number;
+  servings: number;
+  equipment?: string[];
+  nutrition: Nutrition;
+  costPerServing: number;
+  flags: string[];
+  pantry?: { have: number; total: number; expiring: number; missingCost: number };
 }
 
 export interface Reason {
-  component: "genre" | "time" | "mood" | "shelf" | "popularity";
-  text: string;
-  contribution: number;
+  code: string;
+  factor: string;
+  params?: Record<string, string | number>;
+  weight: number;
 }
 
 export interface Recommendation {
-  book: Book;
+  recipe: Recipe;
   score: number;
+  components: Record<string, number>;
   reasons: Reason[];
 }
 
-export interface Preferences {
-  genres: string[];
-  moods: string[];
-  budgetMinutes: number | null;
-  wordsPerMinute: number;
+export interface Restrictions {
+  diet: string;
+  allergens: string[];
+  religious: string[];
+  other: string[];
 }
 
+export interface Preferences {
+  goal: string;
+  mode: "everyday" | "fitness";
+  dailyKcal: number;
+  proteinG: number;
+  cuisines: string[];
+  restrictions: Restrictions;
+  equipment: string[];
+  maxMinutes: number;
+  mealBudget: number;
+  zip: string;
+  area: string;
+}
+
+export interface Neighborhood {
+  id: string;
+  en: string;
+  zh: string;
+  lat: number;
+  lng: number;
+}
+
+export interface Meta {
+  cuisines: string[];
+  tags: string[];
+  equipment: string[];
+  goals: string[];
+  modes: string[];
+  diets: string[];
+  allergens: string[];
+  religious: string[];
+  other: string[];
+  themes: string[];
+  restaurantCuisines: string[];
+  neighborhoods: Neighborhood[];
+}
+
+export interface Ingredient {
+  food_id: string;
+  name_en: string;
+  name_zh: string;
+  grams: number;
+  have_grams: number;
+  price: number;
+  flags: string[];
+}
+
+export interface RecipeDetail extends Recipe {
+  saved: boolean;
+  ingredients: Ingredient[];
+  takeout: { doordash: string; ubereats: string };
+}
+
+export interface ShoppingItem {
+  food_id: string;
+  name_en: string;
+  name_zh: string;
+  grams: number;
+  est_usd: number;
+  recipes: string[];
+}
+
+export interface PantryItem {
+  id: number;
+  food_id: string;
+  name_en: string;
+  name_zh: string;
+  grams: number;
+  days_left: number;
+}
+
+export interface MealLog {
+  id: number;
+  recipe_id: string | null;
+  label: string;
+  title_zh: string | null;
+  emoji: string | null;
+  source: string;
+  kcal: number;
+  protein: number;
+}
+
+export interface DayLog {
+  day: string;
+  items: MealLog[];
+  totals: { kcal: number; protein: number; carbs: number; fat: number; sugar: number; sodium_mg: number; meals: number };
+  targets: { kcal: number; protein: number; sodiumMg: number };
+}
+
+export interface Intent {
+  id: number;
+  kind: "grocery" | "takeout" | "restaurant";
+  provider: string;
+  url: string;
+  payload: { label?: string };
+}
+
+export interface Participant {
+  name: string;
+  origin: { lat: number; lng: number };
+  likes: string[];
+  avoids: string[];
+  restrictions: Restrictions;
+}
+
+export interface GroupResult {
+  restaurant: {
+    id: string; name: string; cuisine: string; price_min: number; price_max: number; rating: number; review_count: number;
+    phone: string; attrs: Record<string, boolean>;
+  };
+  score: number;
+  components: Record<string, number>;
+  travel: { name: string; minutes: number }[];
+  reasons: { code: string; params?: Record<string, string | number>; weight: number }[];
+  warnings: string[];
+  mapsUrl: string;
+}
+
+const TOKEN_KEY = "platewise.token";
 let token: string | null = null;
 try {
-  token = localStorage.getItem("tastetrail.token");
+  token = localStorage.getItem(TOKEN_KEY);
 } catch {
   /* storage blocked */
 }
@@ -39,15 +173,18 @@ try {
 function setToken(t: string | null) {
   token = t;
   try {
-    if (t) localStorage.setItem("tastetrail.token", t);
-    else localStorage.removeItem("tastetrail.token");
+    if (t) localStorage.setItem(TOKEN_KEY, t);
+    else localStorage.removeItem(TOKEN_KEY);
   } catch {
     /* ignore */
   }
 }
 
 export class ApiError extends Error {
-  constructor(public status: number, message: string) {
+  constructor(
+    public status: number,
+    message: string,
+  ) {
     super(message);
   }
 }
@@ -71,6 +208,13 @@ async function call<T>(method: string, path: string, body?: unknown): Promise<T>
   return data as T;
 }
 
+/** Local calendar day and hour, so "today" means the user's today. */
+export function clock() {
+  const d = new Date();
+  const day = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  return { day, hour: d.getHours() };
+}
+
 export const api = {
   hasToken: () => token !== null,
   logout: () => setToken(null),
@@ -80,26 +224,28 @@ export const api = {
     return r.email;
   },
   me: () => call<{ email: string; preferences: Preferences }>("GET", "/api/me"),
-  meta: () => call<{ genres: string[]; moods: string[] }>("GET", "/api/meta"),
+  meta: () => call<Meta>("GET", "/api/meta"),
   savePreferences: (p: Preferences) => call<Preferences>("PUT", "/api/preferences", p),
-  recommend: (p: Preferences & { diversity: number; limit: number }) =>
-    call<{ items: Recommendation[] }>("POST", "/api/recommendations", p),
-  shelf: () => call<{ items: { book: Book; savedAt: string }[] }>("GET", "/api/shelf"),
-  save: (bookId: string) => call("POST", "/api/shelf", { bookId }),
-  unsave: (bookId: string) => call("DELETE", `/api/shelf/${encodeURIComponent(bookId)}`),
-  dismiss: (bookId: string) => call("POST", "/api/dismissals", { bookId }),
-  books: (q: string, genre: string) => {
-    const qs = new URLSearchParams();
-    if (q) qs.set("q", q);
-    if (genre) qs.set("genre", genre);
-    return call<{ items: Book[] }>("GET", `/api/books?${qs}`);
-  },
+  recommend: (o: { mode?: string; cuisine?: string; q?: string; limit?: number }) =>
+    call<{ items: Recommendation[]; intake: { kcal: number } }>("POST", "/api/recommendations", { ...o, ...clock() }),
+  mealPlan: () => call<{ items: { slot: string; recipe: Recipe }[]; totalKcal: number; targetKcal: number }>("POST", "/api/meal-plan", { day: clock().day }),
+  recipe: (id: string) => call<RecipeDetail>("GET", `/api/recipes/${encodeURIComponent(id)}`),
+  interact: (recipeId: string, kind: "save" | "dismiss") => call("POST", "/api/interactions", { recipeId, kind }),
+  unsave: (recipeId: string) => call("DELETE", `/api/interactions/${encodeURIComponent(recipeId)}/save`),
+  dayLog: () => call<DayLog>("GET", `/api/meal-logs?day=${clock().day}`),
+  logRecipe: (recipeId: string, servings = 1) => call("POST", "/api/meal-logs", { recipeId, servings, day: clock().day }),
+  logManual: (label: string, kcal: number, source: "manual" | "takeout") => call("POST", "/api/meal-logs", { label, kcal, source, day: clock().day }),
+  deleteLog: (id: number) => call("DELETE", `/api/meal-logs/${id}`),
+  pantry: () => call<{ items: PantryItem[] }>("GET", "/api/pantry"),
+  addPantry: (foodId: string, grams: number) => call("POST", "/api/pantry", { foodId, grams }),
+  deletePantry: (id: number) => call("DELETE", `/api/pantry/${id}`),
+  foods: (q: string) => call<{ items: { id: string; name_en: string; name_zh: string }[] }>("GET", `/api/foods?q=${encodeURIComponent(q)}`),
+  shoppingList: (recipeIds: string[]) => call<{ items: ShoppingItem[]; estTotal: number }>("POST", "/api/shopping-list", { recipeIds }),
+  checkout: (recipeIds: string[], provider: "instacart" | "kroger") =>
+    call<{ url: string; mode: string; intentId: number }>("POST", "/api/checkout", { recipeIds, provider }),
+  takeout: (provider: "doordash" | "ubereats", query: string) => call<{ url: string; intentId: number }>("POST", "/api/takeout", { provider, query }),
+  pending: () => call<{ items: Intent[] }>("GET", "/api/intents/pending"),
+  resolve: (id: number, confirmed: boolean) => call("POST", `/api/intents/${id}`, { confirmed }),
+  group: (q: unknown) => call<{ items: GroupResult[] }>("POST", "/api/group/recommendations", q),
+  visit: (restaurantId: string, name: string) => call<{ url: string; intentId: number }>("POST", "/api/group/visit", { restaurantId, name }),
 };
-
-export function formatMinutes(min: number): string {
-  if (min < 60) return `${min} min`;
-  const h = min / 60;
-  return `${h < 10 ? h.toFixed(1).replace(/\.0$/, "") : Math.round(h)} h`;
-}
-
-export const pretty = (s: string) => s.replace(/-/g, " ");

@@ -4,3 +4,6 @@ dist/
 *.db-shm
 *.db-wal
 .env
+pgdata/
+*.csv
+*.tsbuildinfo

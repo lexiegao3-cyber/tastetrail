@@ -9,11 +9,11 @@ export interface AuthConfig {
 }
 
 export function authConfigFromEnv(env = process.env): AuthConfig {
-  const raw = env.TASTETRAIL_JWT_SECRET;
-  if (!raw && env.NODE_ENV === "production") throw new Error("TASTETRAIL_JWT_SECRET is required in production");
+  const raw = env.PLATEWISE_JWT_SECRET;
+  if (!raw && env.NODE_ENV === "production") throw new Error("PLATEWISE_JWT_SECRET is required in production");
   return {
     secret: new TextEncoder().encode(raw ?? "dev-only-insecure-secret-change-me-0123456789"),
-    ttlSeconds: Number(env.TASTETRAIL_JWT_TTL_SECONDS ?? 7200),
+    ttlSeconds: Number(env.PLATEWISE_JWT_TTL_SECONDS ?? 7200),
   };
 }
 

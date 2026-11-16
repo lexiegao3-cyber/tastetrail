@@ -42,7 +42,7 @@ export interface RankContext {
   prefs: Preferences;
   history: HistoryItem[];
   intake: DayIntake;
-  cf: Map<string, { sim: number; seed: string }>;
+  cf: Map<string, { sim: number; seed: string; en?: string; zh?: string }>;
   popularity: Map<string, number>;
   /** Local hour, used to estimate how many meals are left today. */
   hour: number;
@@ -137,7 +137,7 @@ export function rank(candidates: Candidate[], ctx: RankContext): Ranked[] {
     const cf = ctx.cf.get(c.id);
     if (active.includes("collaborative")) {
       comp.collaborative = clamp((cf?.sim ?? 0) * 2);
-      if (cf && cf.sim > 0.1) reasons.push({ code: "cf.alsoLiked", factor: "collaborative", params: { seed: cf.seed }, weight: 0 });
+      if (cf && cf.sim > 0.1) reasons.push({ code: "cf.alsoLiked", factor: "collaborative", params: { en: cf.en ?? cf.seed, zh: cf.zh ?? cf.seed }, weight: 0 });
     }
 
     // 5. Familiarity with what the user saved or cooked.

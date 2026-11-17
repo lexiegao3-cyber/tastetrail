@@ -51,6 +51,18 @@ Tests: `cd server && npm test` (31 unit + API tests, each on a fresh in-memory P
 | `INSTACART_API_KEY` | unset | Live Instacart shopping-list links |
 | `PORT` | `3001` | API port |
 
+### Deploy
+
+In production one Node service serves both the API and the built client (`server/dist` + `client/dist`), so there is a single URL and no CORS setup.
+
+1. Create a free Postgres database on [Neon](https://neon.tech) and copy its connection string (it ends in `?sslmode=require`).
+2. On [Render](https://render.com): **New → Blueprint**, pick this repository. `render.yaml` defines the service, build and start commands, and a health check on `/api/health`. Paste the Neon string into `DATABASE_URL` when asked; the JWT secret is generated for you.
+3. Tables, the materialized view and the seed catalog are created on first start.
+
+Without `DATABASE_URL` the service falls back to embedded PGlite on the instance disk, which Render wipes on every deploy. Render's free tier also sleeps after 15 minutes idle, so the first request after that takes about a minute.
+
+To run the production build locally: `cd client && npm run build`, then `cd server && npm run build && npm start`, and open http://localhost:3001.
+
 ### Importing real recipes
 
 The seed catalog is 32 bilingual demo recipes over 67 foods. To load RecipeNLG (research use only; download it yourself, the CSV is not committed):

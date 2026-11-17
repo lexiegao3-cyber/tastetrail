@@ -47,7 +47,7 @@ cd server && npm install && npm run dev     # API on :3001, data in ./pgdata (PG
 cd client && npm install && npm run dev     # UI on :5173, proxies /api to :3001
 ```
 
-Tests: `cd server && npm test` (49 unit, ETL and API tests, each on a fresh in-memory PGlite).
+Tests: `cd server && npm test` (50 unit, ETL and API tests, each on a fresh in-memory PGlite).
 
 | Variable | Default | Purpose |
 | --- | --- | --- |

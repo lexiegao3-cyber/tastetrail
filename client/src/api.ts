@@ -93,8 +93,21 @@ export interface Ingredient {
 
 export interface RecipeDetail extends Recipe {
   saved: boolean;
+  source: string;
+  quantitiesEstimated: boolean;
   ingredients: Ingredient[];
   takeout: { doordash: string; ubereats: string };
+}
+
+export interface Trends {
+  days: number;
+  end: string;
+  daily: { day: string; kcal: number; protein: number; meals: number; takeout: number }[];
+  targets: { kcal: number; protein: number };
+  summary: {
+    loggedDays: number; avgKcal: number; avgProtein: number; daysOnTarget: number; takeoutShare: number;
+    groceryUsd: number; groceryOrders: number; takeoutOrders: number; wasteItems: number; wasteUsd: number;
+  };
 }
 
 export interface ShoppingItem {
@@ -147,6 +160,15 @@ export interface Participant {
   likes: string[];
   avoids: string[];
   restrictions: Restrictions;
+}
+
+export interface PollOption {
+  id: string; name: string; cuisine: string; priceMin: number; priceMax: number; phone: string; mapsUrl: string;
+}
+export interface Poll {
+  title: string;
+  expiresAt: string;
+  options: (PollOption & { voters: string[] })[];
 }
 
 export interface GroupResult {
@@ -228,10 +250,11 @@ export const api = {
   savePreferences: (p: Preferences) => call<Preferences>("PUT", "/api/preferences", p),
   recommend: (o: { mode?: string; cuisine?: string; q?: string; limit?: number }) =>
     call<{ items: Recommendation[]; intake: { kcal: number } }>("POST", "/api/recommendations", { ...o, ...clock() }),
-  mealPlan: () => call<{ items: { slot: string; recipe: Recipe }[]; totalKcal: number; targetKcal: number }>("POST", "/api/meal-plan", { day: clock().day }),
+  mealPlan: () => call<{ items: { slot: string; recipe: Recipe }[]; totalKcal: number; totalProtein: number; targetKcal: number; targetProtein: number; solver: string }>("POST", "/api/meal-plan", { day: clock().day }),
   recipe: (id: string) => call<RecipeDetail>("GET", `/api/recipes/${encodeURIComponent(id)}`),
   interact: (recipeId: string, kind: "save" | "dismiss") => call("POST", "/api/interactions", { recipeId, kind }),
   unsave: (recipeId: string) => call("DELETE", `/api/interactions/${encodeURIComponent(recipeId)}/save`),
+  trends: (days = 14) => call<Trends>("GET", `/api/trends?day=${clock().day}&days=${days}`),
   dayLog: () => call<DayLog>("GET", `/api/meal-logs?day=${clock().day}`),
   logRecipe: (recipeId: string, servings = 1) => call("POST", "/api/meal-logs", { recipeId, servings, day: clock().day }),
   logManual: (label: string, kcal: number, source: "manual" | "takeout") => call("POST", "/api/meal-logs", { label, kcal, source, day: clock().day }),
@@ -246,6 +269,10 @@ export const api = {
   takeout: (provider: "doordash" | "ubereats", query: string) => call<{ url: string; intentId: number }>("POST", "/api/takeout", { provider, query }),
   pending: () => call<{ items: Intent[] }>("GET", "/api/intents/pending"),
   resolve: (id: number, confirmed: boolean) => call("POST", `/api/intents/${id}`, { confirmed }),
-  group: (q: unknown) => call<{ items: GroupResult[] }>("POST", "/api/group/recommendations", q),
-  visit: (restaurantId: string, name: string) => call<{ url: string; intentId: number }>("POST", "/api/group/visit", { restaurantId, name }),
+  group: (q: unknown) => call<{ items: GroupResult[]; source: "demo" | "google-places" }>("POST", "/api/group/recommendations", q),
+  visit: (restaurantId: string, name: string, mapsUrl?: string) =>
+    call<{ url: string; intentId: number }>("POST", "/api/group/visit", { restaurantId, name, mapsUrl }),
+  createPoll: (title: string, options: PollOption[]) => call<{ token: string; path: string }>("POST", "/api/group/polls", { title, options }),
+  poll: (token: string) => call<Poll>("GET", `/api/polls/${encodeURIComponent(token)}`),
+  vote: (token: string, name: string, optionId: string) => call("POST", `/api/polls/${encodeURIComponent(token)}/vote`, { name, optionId }),
 };

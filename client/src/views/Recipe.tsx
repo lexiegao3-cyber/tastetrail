@@ -92,12 +92,13 @@ export function RecipeView({ id }: { id: string }) {
                 return (
                   <li key={i.food_id}>
                     <span>{name(i.name_en, i.name_zh)}</span>
-                    <span className="muted">{Math.round(i.grams / r.servings)} g</span>
+                    <span className="muted">{r.quantitiesEstimated ? "~" : ""}{Math.round(i.grams / r.servings)} g</span>
                     <span className={`badge ${have ? "ok" : ""}`}>{have ? t("detail.have") : t("detail.need")}</span>
                   </li>
                 );
               })}
             </ul>
+            {r.quantitiesEstimated && <p className="small muted">{t("detail.estimated")}</p>}
           </section>
 
           <div className="actions">

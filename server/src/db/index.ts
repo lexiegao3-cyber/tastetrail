@@ -1,5 +1,6 @@
 import { PGlite } from "@electric-sql/pglite";
 import { pg_trgm } from "@electric-sql/pglite/contrib/pg_trgm";
+import { createHash } from "node:crypto";
 import pg from "pg";
 import { FOODS } from "../data/foods.js";
 import { RECIPES } from "../data/recipes.js";
@@ -233,6 +234,115 @@ const MIGRATIONS: { id: string; sql: string }[] = [
       CREATE INDEX recipe_nutrition_kcal ON recipe_nutrition(kcal);
     `,
   },
+  {
+    // Imported datasets (Food.com) publish per-serving nutrition but no ingredient
+    // quantities. Their nutrition is stored as given; grams are category estimates
+    // used only for pantry, shopping list and cost.
+    id: "0002_imported_recipes",
+    sql: `
+      ALTER TABLE recipes ADD COLUMN nutrition JSONB;
+      ALTER TABLE recipes ADD COLUMN quantities_estimated BOOLEAN NOT NULL DEFAULT false;
+      ALTER TABLE foods ADD COLUMN category TEXT;
+      ALTER TABLE external_ratings ADD COLUMN rated_on DATE;
+
+      DROP MATERIALIZED VIEW recipe_nutrition;
+      CREATE MATERIALIZED VIEW recipe_nutrition AS
+      WITH computed AS (
+        SELECT r.id AS recipe_id, r.servings, r.nutrition AS given,
+               sum(f.kcal * ri.grams / 100) AS kcal, sum(f.protein * ri.grams / 100) AS protein,
+               sum(f.carbs * ri.grams / 100) AS carbs, sum(f.fat * ri.grams / 100) AS fat,
+               sum(f.sat_fat * ri.grams / 100) AS sat_fat, sum(f.sugar * ri.grams / 100) AS sugar,
+               sum(f.fiber * ri.grams / 100) AS fiber, sum(f.sodium_mg * ri.grams / 100) AS sodium_mg,
+               sum(f.price_per_100g * ri.grams / 100) AS cost,
+               count(*)::int AS n_ingredients
+          FROM recipes r
+          JOIN recipe_ingredients ri ON ri.recipe_id = r.id
+          JOIN foods f ON f.id = ri.food_id
+         GROUP BY r.id
+      ),
+      recipe_flags AS (
+        SELECT ri.recipe_id, array_agg(DISTINCT fl ORDER BY fl) AS flags
+          FROM recipe_ingredients ri
+          JOIN foods f ON f.id = ri.food_id
+          CROSS JOIN LATERAL unnest(f.flags) AS fl
+         GROUP BY ri.recipe_id
+      )
+      SELECT c.recipe_id,
+             round(coalesce((given->>'kcal')::numeric, kcal / servings)) AS kcal,
+             round(coalesce((given->>'protein')::numeric, protein / servings), 1) AS protein,
+             round(coalesce((given->>'carbs')::numeric, carbs / servings), 1) AS carbs,
+             round(coalesce((given->>'fat')::numeric, fat / servings), 1) AS fat,
+             round(coalesce((given->>'sat_fat')::numeric, sat_fat / servings), 1) AS sat_fat,
+             round(coalesce((given->>'sugar')::numeric, sugar / servings), 1) AS sugar,
+             round(CASE WHEN given IS NULL THEN fiber / servings ELSE (given->>'fiber')::numeric END, 1) AS fiber,
+             round(coalesce((given->>'sodium_mg')::numeric, sodium_mg / servings)) AS sodium_mg,
+             round(cost / servings, 2) AS cost_per_serving,
+             n_ingredients,
+             coalesce(rf.flags, '{}') AS flags
+        FROM computed c
+        LEFT JOIN recipe_flags rf ON rf.recipe_id = c.recipe_id;
+      CREATE UNIQUE INDEX recipe_nutrition_pk ON recipe_nutrition(recipe_id);
+      CREATE INDEX recipe_nutrition_flags ON recipe_nutrition USING GIN (flags);
+      CREATE INDEX recipe_nutrition_kcal ON recipe_nutrition(kcal);
+    `,
+  },
+  {
+    // Performance at Food.com scale (see docs/PERFORMANCE.md):
+    // - likes per recipe (popularity and the CF degree) precomputed instead of
+    //   aggregated per request;
+    // - covering indexes so CF walks recipe → likers → their likes by index only.
+    id: "0003_scale",
+    sql: `
+      CREATE MATERIALIZED VIEW recipe_popularity AS
+      SELECT recipe_id, count(*)::int AS n FROM (
+        SELECT recipe_id FROM external_ratings WHERE rating >= 4
+        UNION ALL
+        SELECT recipe_id FROM interactions WHERE kind IN ('save', 'cooked')
+      ) x GROUP BY recipe_id;
+      CREATE UNIQUE INDEX recipe_popularity_pk ON recipe_popularity(recipe_id);
+      CREATE INDEX recipe_popularity_n ON recipe_popularity(n DESC, recipe_id);
+
+      DROP INDEX external_ratings_recipe;
+      CREATE INDEX external_ratings_recipe ON external_ratings(recipe_id, rated_on DESC) INCLUDE (user_key, rating);
+      CREATE INDEX external_ratings_user ON external_ratings(user_key, rated_on DESC) INCLUDE (recipe_id, rating);
+      CREATE INDEX interactions_recipe ON interactions(recipe_id, kind) INCLUDE (user_id, created_at);
+      DROP INDEX recipe_ingredients_food;
+      CREATE INDEX recipe_ingredients_food ON recipe_ingredients(food_id) INCLUDE (recipe_id);
+      CREATE INDEX recipes_title_zh_trgm ON recipes USING GIN (title_zh gin_trgm_ops);
+      CREATE INDEX recipes_cuisine ON recipes(cuisine);
+
+      CREATE TABLE app_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+
+      -- JIT compilation costs more than it saves on these sub-second queries (about
+      -- 0.9 s extra on the candidate query at Food.com scale), and the default
+      -- random_page_cost (4, for spinning disks) makes the planner pick full scans
+      -- over index lookups on SSD-backed hosts such as Neon. Applies to new sessions.
+      DO $$ BEGIN EXECUTE format('ALTER DATABASE %I SET jit = off', current_database()); EXECUTE format('ALTER DATABASE %I SET random_page_cost = 1.1', current_database()); EXCEPTION WHEN insufficient_privilege THEN RAISE NOTICE 'planner settings not applied'; END $$;
+    `,
+  },
+  {
+    // Group polls, and visits that may point at a Google place ID (not a demo row).
+    id: "0004_group_polls",
+    sql: `
+      ALTER TABLE restaurant_visits DROP CONSTRAINT restaurant_visits_restaurant_id_fkey;
+      CREATE TABLE polls (
+        id SERIAL PRIMARY KEY,
+        token TEXT NOT NULL UNIQUE,
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        title TEXT NOT NULL,
+        options JSONB NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        expires_at TIMESTAMPTZ NOT NULL
+      );
+      CREATE TABLE poll_votes (
+        poll_id INTEGER NOT NULL REFERENCES polls(id) ON DELETE CASCADE,
+        voter TEXT NOT NULL,
+        option_id TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        PRIMARY KEY (poll_id, voter)
+      );
+    `,
+  },
 ];
 
 async function migrate(db: Db): Promise<void> {
@@ -254,8 +364,16 @@ const splitSql = (sql: string) =>
     .map((s) => s.replace(/^\s*--.*$/gm, "").trim())
     .filter(Boolean);
 
-/** Upserts demo data so edits in code propagate on restart without touching user data. */
+/**
+ * Upserts demo data so edits in code propagate on restart without touching user
+ * data. Skipped when the seed is unchanged: at Food.com scale, rewriting it and
+ * refreshing the views on every boot costs time and resets the visibility map
+ * that index-only scans rely on.
+ */
 async function seed(db: Db): Promise<void> {
+  const hash = createHash("sha256").update(JSON.stringify([FOODS, RECIPES, RESTAURANTS])).digest("hex");
+  const [prev] = await db.query<{ value: string }>("SELECT value FROM app_meta WHERE key = 'seed_hash'");
+  if (prev?.value === hash) return;
   await db.transaction(async (tx) => {
     for (const f of FOODS) {
       await tx.query(
@@ -289,6 +407,18 @@ async function seed(db: Db): Promise<void> {
     }
   });
   await refreshNutrition(db);
+  await db.query(
+    "INSERT INTO app_meta (key, value) VALUES ('seed_hash', $1) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+    [hash],
+  );
 }
 
-export const refreshNutrition = (db: Db) => db.query("REFRESH MATERIALIZED VIEW recipe_nutrition").then(() => undefined);
+export async function refreshNutrition(db: Db): Promise<void> {
+  await db.query("REFRESH MATERIALIZED VIEW recipe_nutrition");
+  await refreshPopularity(db);
+}
+
+/** Popularity changes with every save; the server refreshes it on a timer (CONCURRENTLY keeps reads unblocked). */
+export async function refreshPopularity(db: Db, concurrently = false): Promise<void> {
+  await db.query(`REFRESH MATERIALIZED VIEW ${concurrently ? "CONCURRENTLY " : ""}recipe_popularity`);
+}

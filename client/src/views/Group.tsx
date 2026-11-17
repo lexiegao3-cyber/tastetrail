@@ -28,6 +28,8 @@ export function GroupView() {
   const [hour, setHour] = useState(19);
   const [travel, setTravel] = useState(30);
   const [results, setResults] = useState<GroupResult[] | null>(null);
+  const [source, setSource] = useState<"demo" | "google-places">("demo");
+  const [pollUrl, setPollUrl] = useState("");
   const [error, setError] = useState("");
   const [copied, setCopied] = useState(false);
 
@@ -42,6 +44,27 @@ export function GroupView() {
         participants: people.map(({ area: _a, ...p }) => p),
       });
       setResults(r.items);
+      setSource(r.source);
+      setPollUrl("");
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  }
+
+  async function startPoll() {
+    if (!results) return;
+    setError("");
+    try {
+      const title = `${v(theme)} · ${size} ${t("group.people")}`;
+      const options = results.slice(0, 4).map((r) => ({
+        id: r.restaurant.id, name: r.restaurant.name, cuisine: r.restaurant.cuisine, priceMin: r.restaurant.price_min,
+        priceMax: r.restaurant.price_max, phone: r.restaurant.phone, mapsUrl: r.mapsUrl,
+      }));
+      const { path } = await api.createPoll(title, options);
+      const url = location.origin + path;
+      setPollUrl(url);
+      if (navigator.share) await navigator.share({ title, url }).catch(() => undefined);
+      else await navigator.clipboard?.writeText(url).catch(() => undefined);
     } catch (e) {
       setError((e as Error).message);
     }
@@ -111,11 +134,27 @@ export function GroupView() {
           <div className="section-head">
             <div>
               <h2>{t("group.results")}</h2>
-              <p className="muted small">{t("group.demo")}</p>
+              {source === "demo" && <p className="muted small">{t("group.demo")}</p>}
             </div>
             {results.length > 0 && <button className="link" onClick={share}><Icon name="copy" size={16} /> {copied ? t("group.copied") : t("group.share")}</button>}
           </div>
           {results.length === 0 && <p className="empty">{t("group.none")}</p>}
+          {results.length >= 2 && (
+            <div className="card poll-cta">
+              <div>
+                <b>{t("group.voteTitle")}</b>
+                <p className="small muted">{t("group.voteSub")}</p>
+              </div>
+              {pollUrl ? (
+                <div className="row gap">
+                  <input readOnly value={pollUrl} onFocus={(e) => e.target.select()} aria-label={t("group.voteLink")} />
+                  <button className="btn ghost small" onClick={() => navigator.clipboard?.writeText(pollUrl)}><Icon name="copy" size={16} /></button>
+                </div>
+              ) : (
+                <button className="btn primary" onClick={startPoll}><Icon name="users" size={18} /> {t("group.startVote")}</button>
+              )}
+            </div>
+          )}
           <div className="list">
             {results.map((r, i) => (
               <article key={r.restaurant.id} className="venue">
@@ -136,7 +175,7 @@ export function GroupView() {
                 <div className="row gap">
                   <button className="btn primary grow" onClick={async () => {
                     const tab = window.open("", "_blank");
-                    const { url } = await api.visit(r.restaurant.id, r.restaurant.name);
+                    const { url } = await api.visit(r.restaurant.id, r.restaurant.name, r.mapsUrl);
                     if (tab) tab.location.href = url;
                   }}><Icon name="map" size={18} /> {t("group.maps")}</button>
                   <a className="btn ghost" href={`tel:${r.restaurant.phone.replace(/[^\d+]/g, "")}`}><Icon name="phone" size={18} /> {r.restaurant.phone}</a>

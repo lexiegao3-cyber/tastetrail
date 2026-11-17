@@ -55,6 +55,7 @@ export interface Candidate {
   have: number;
   expiring: number;
   missing_cost: number;
+  pop: number;
   food_ids: string[];
 }
 
@@ -123,11 +124,25 @@ export class Repository {
 
   // ---- recommendation pipeline -----------------------------------------------
   /**
-   * Stages 2–4 of the SQL pipeline in one parameterized statement:
-   * hard filters on the materialized nutrition view (GIN on flags), pantry
-   * coverage and missing-ingredient cost per candidate, coarse pre-sort.
+   * Stages 2–4 of the SQL pipeline in one parameterized statement.
+   *  - pool: at most 3 × limit recipes that pass the hard filters (restriction
+   *    flags, equipment, time, cuisine, search, dismissed), from three index walks
+   *    that each stop at the limit: the user's pantry foods → recipes using them
+   *    (most matches, then best coverage), the popularity index (most liked first), and the
+   *    primary key (so a catalog without ratings still yields candidates).
+   *  - cover: exact pantry coverage, expiring items and missing-ingredient cost,
+   *    for the pool only.
+   * The whole catalog is never filtered and sorted per request; the engine ranks the pool.
    */
   async candidates(userId: number | null, q: CandidateQuery): Promise<Candidate[]> {
+    const passes = (r: string, n: string) => `NOT (${n}.flags && $2::text[])
+            AND ${r}.equipment <@ $3::text[]
+            AND ${r}.minutes <= $4
+            AND ($5::text IS NULL OR ${r}.cuisine = $5)
+            AND ($6::text IS NULL OR ${r}.title_en ILIKE '%' || $6 || '%' OR ${r}.title_en % $6
+                 OR ${r}.title_zh LIKE '%' || $6 || '%')
+            AND NOT EXISTS (SELECT 1 FROM interactions i
+                             WHERE i.user_id = $1 AND i.recipe_id = ${r}.id AND i.kind = 'dismiss')`;
     return this.db.query<Candidate>(
       `WITH pantry AS (
          SELECT food_id, sum(grams) AS grams, min(expires_at) AS expires_at
@@ -135,18 +150,32 @@ export class Repository {
           WHERE user_id = $1 AND expires_at > now()
           GROUP BY food_id
        ),
-       cand AS (
-         SELECT r.id, r.title_en, r.title_zh, r.emoji, r.cuisine, r.tags, r.minutes, r.steps, r.servings, r.equipment, ${NUTRITION_COLS}
-           FROM recipes r
-           JOIN recipe_nutrition n ON n.recipe_id = r.id
-          WHERE NOT (n.flags && $2::text[])
-            AND r.equipment <@ $3::text[]
-            AND r.minutes <= $4
-            AND ($5::text IS NULL OR r.cuisine = $5)
-            AND ($6::text IS NULL OR r.title_en ILIKE '%' || $6 || '%' OR r.title_zh LIKE '%' || $6 || '%'
-                 OR similarity(r.title_en, $6) > 0.25)
-            AND NOT EXISTS (SELECT 1 FROM interactions i
-                             WHERE i.user_id = $1 AND i.recipe_id = r.id AND i.kind = 'dismiss')
+       pantry_hits AS (
+         -- Common pantry foods (onion, eggs) appear in tens of thousands of recipes:
+         -- keep the 10 × limit with the most matches before any per-recipe lookups.
+         SELECT ri.recipe_id, count(*) AS hits
+           FROM pantry p JOIN recipe_ingredients ri ON ri.food_id = p.food_id
+          GROUP BY ri.recipe_id
+          ORDER BY hits DESC, ri.recipe_id
+          LIMIT $7 * 10
+       ),
+       pool AS (
+         (SELECT r.id FROM pantry_hits h
+            JOIN recipes r ON r.id = h.recipe_id
+            JOIN recipe_nutrition n ON n.recipe_id = h.recipe_id
+           WHERE ${passes("r", "n")}
+           ORDER BY h.hits::float8 / n.n_ingredients DESC, r.id LIMIT $7)
+         UNION
+         (SELECT r.id FROM recipe_popularity pop
+            JOIN recipes r ON r.id = pop.recipe_id
+            JOIN recipe_nutrition n ON n.recipe_id = pop.recipe_id
+           WHERE ${passes("r", "n")}
+           ORDER BY pop.n DESC, pop.recipe_id LIMIT $7)
+         UNION
+         (SELECT r.id FROM recipes r
+            JOIN recipe_nutrition n ON n.recipe_id = r.id
+           WHERE ${passes("r", "n")}
+           ORDER BY r.id LIMIT $7)
        ),
        cover AS (
          SELECT ri.recipe_id,
@@ -154,48 +183,78 @@ export class Repository {
                 count(*) FILTER (WHERE p.expires_at < now() + interval '3 days')::int AS expiring,
                 round(sum(greatest(ri.grams - coalesce(p.grams, 0), 0) * f.price_per_100g / 100), 2)::float8 AS missing_cost,
                 array_agg(ri.food_id ORDER BY ri.food_id) AS food_ids
-           FROM recipe_ingredients ri
-           JOIN cand c ON c.id = ri.recipe_id
+           FROM pool
+           JOIN recipe_ingredients ri ON ri.recipe_id = pool.id
            JOIN foods f ON f.id = ri.food_id
            LEFT JOIN pantry p ON p.food_id = ri.food_id
           GROUP BY ri.recipe_id
        )
-       SELECT c.*, cv.have, cv.expiring, cv.missing_cost, cv.food_ids
-         FROM cand c
-         JOIN cover cv ON cv.recipe_id = c.id
-        ORDER BY cv.have::float8 / c.n_ingredients DESC, c.minutes ASC
-        LIMIT $7`,
+       SELECT r.id, r.title_en, r.title_zh, r.emoji, r.cuisine, r.tags, r.minutes, r.steps, r.servings, r.equipment, ${NUTRITION_COLS},
+              cv.have, cv.expiring, cv.missing_cost, cv.food_ids, coalesce(pop.n, 0) AS pop
+         FROM pool
+         JOIN recipes r ON r.id = pool.id
+         JOIN recipe_nutrition n ON n.recipe_id = pool.id
+         JOIN cover cv ON cv.recipe_id = pool.id
+         LEFT JOIN recipe_popularity pop ON pop.recipe_id = pool.id
+        ORDER BY cv.have::float8 / n.n_ingredients DESC, pop DESC, r.id`,
       [userId, q.banned, q.equipment, q.maxMinutes, q.cuisine ?? null, q.q?.trim() || null, q.limit ?? 200],
     );
   }
 
   /**
    * Item-item collaborative filtering in SQL: cosine similarity of co-likes
-   * between the user's saved/cooked recipes and every other recipe, using
-   * imported ratings (≥ 4 stars) plus other users' saves and cooks.
+   * (imported ratings >= 4 plus other users' saves and cooks) between the
+   * user's 50 most recent saved/cooked recipes and every recipe their likers
+   * also liked. Each seed contributes its 200 most recent likers, each liker
+   * their 200 most recent likes, all by index; degrees come from
+   * recipe_popularity. A candidate keeps its best-matching seed.
    */
   async itemSimilarity(userId: number): Promise<Map<string, { sim: number; seed: string; en: string; zh: string }>> {
     const rows = await this.db.query<{ cand: string; seed: string; sim: number; en: string; zh: string }>(
-      `WITH likes AS (
-         SELECT user_key, recipe_id FROM external_ratings WHERE rating >= 4
-         UNION
-         SELECT 'u' || user_id, recipe_id FROM interactions WHERE kind IN ('save', 'cooked') AND user_id <> $1
+      `WITH mine AS (
+         SELECT recipe_id FROM interactions
+          WHERE user_id = $1 AND kind IN ('save', 'cooked')
+          GROUP BY recipe_id ORDER BY max(created_at) DESC LIMIT 50
        ),
-       mine AS (SELECT DISTINCT recipe_id FROM interactions WHERE user_id = $1 AND kind IN ('save', 'cooked')),
-       deg AS (SELECT recipe_id, count(*)::float8 AS d FROM likes GROUP BY recipe_id),
+       likers AS (
+         SELECT m.recipe_id AS seed, l.user_key, l.app_user
+           FROM mine m
+           CROSS JOIN LATERAL (
+             SELECT * FROM (
+               SELECT e.user_key, NULL::int AS app_user, e.rated_on::timestamptz AS t
+                 FROM external_ratings e WHERE e.recipe_id = m.recipe_id AND e.rating >= 4
+               UNION ALL
+               SELECT NULL, i.user_id, i.created_at
+                 FROM interactions i
+                WHERE i.recipe_id = m.recipe_id AND i.kind IN ('save', 'cooked') AND i.user_id <> $1
+             ) x ORDER BY t DESC NULLS LAST LIMIT 200
+           ) l
+       ),
        co AS (
-         SELECT a.recipe_id AS seed, b.recipe_id AS cand, count(*)::float8 AS n
-           FROM likes a
-           JOIN likes b ON b.user_key = a.user_key AND b.recipe_id <> a.recipe_id
-          WHERE a.recipe_id IN (SELECT recipe_id FROM mine)
+         SELECT lk.seed, j.recipe_id AS cand, count(DISTINCT coalesce(lk.user_key, 'u' || lk.app_user))::float8 AS n
+           FROM likers lk
+           CROSS JOIN LATERAL (
+             SELECT e.recipe_id FROM external_ratings e
+              WHERE lk.user_key IS NOT NULL AND e.user_key = lk.user_key AND e.rating >= 4
+              ORDER BY e.rated_on DESC LIMIT 200
+           ) j
+          WHERE j.recipe_id <> lk.seed
           GROUP BY 1, 2
-       )
-       SELECT DISTINCT ON (co.cand) co.cand, co.seed, s.title_en AS en, s.title_zh AS zh, (co.n / sqrt(da.d * db.d))::float8 AS sim
-         FROM co
-         JOIN recipes s ON s.id = co.seed
-         JOIN deg da ON da.recipe_id = co.seed
-         JOIN deg db ON db.recipe_id = co.cand
-        ORDER BY co.cand, sim DESC`,
+         UNION ALL
+         SELECT lk.seed, i.recipe_id, count(DISTINCT lk.app_user)::float8
+           FROM likers lk
+           JOIN interactions i ON i.user_id = lk.app_user AND i.kind IN ('save', 'cooked') AND i.recipe_id <> lk.seed
+          GROUP BY 1, 2
+       ),
+       summed AS (SELECT seed, cand, sum(n) AS n FROM co GROUP BY 1, 2)
+       SELECT DISTINCT ON (s.cand) s.cand, s.seed, r.title_en AS en, r.title_zh AS zh,
+              (s.n / sqrt(greatest(da.n, 1) * greatest(db.n, 1)))::float8 AS sim
+         FROM summed s
+         JOIN recipes r ON r.id = s.seed
+         LEFT JOIN recipe_popularity da ON da.recipe_id = s.seed
+         LEFT JOIN recipe_popularity db ON db.recipe_id = s.cand
+        WHERE s.cand NOT IN (SELECT recipe_id FROM mine)
+        ORDER BY s.cand, sim DESC`,
       [userId],
     );
     return new Map(rows.map((r) => [r.cand, { sim: r.sim, seed: r.seed, en: r.en, zh: r.zh }]));
@@ -212,15 +271,6 @@ export class Repository {
     );
   }
 
-  async popularity(): Promise<Map<string, number>> {
-    const rows = await this.db.query<{ recipe_id: string; n: number }>(
-      `SELECT recipe_id, count(*)::int AS n FROM (
-         SELECT recipe_id FROM interactions WHERE kind IN ('save', 'cooked')
-         UNION ALL SELECT recipe_id FROM external_ratings WHERE rating >= 4) x GROUP BY recipe_id`,
-    );
-    return new Map(rows.map((r) => [r.recipe_id, r.n]));
-  }
-
   // ---- recipes -------------------------------------------------------------------
   async listRecipes() {
     return this.db.query(
@@ -230,8 +280,9 @@ export class Repository {
   }
 
   async recipe(id: string, userId: number | null) {
-    const head = await this.db.query<Candidate>(
-      `SELECT r.id, r.title_en, r.title_zh, r.emoji, r.cuisine, r.tags, r.minutes, r.steps, r.servings, r.equipment, ${NUTRITION_COLS}
+    const head = await this.db.query<Candidate & { quantities_estimated: boolean; source: string }>(
+      `SELECT r.id, r.title_en, r.title_zh, r.emoji, r.cuisine, r.tags, r.minutes, r.steps, r.servings, r.equipment,
+              r.quantities_estimated, r.source, ${NUTRITION_COLS}
          FROM recipes r JOIN recipe_nutrition n ON n.recipe_id = r.id WHERE r.id = $1`,
       [id],
     );
@@ -338,6 +389,38 @@ export class Repository {
       [userId, day],
     );
     return t!;
+  }
+
+  /**
+   * Trends over the `days` days ending on `endDay`: daily intake, how many meals
+   * came from takeout, grocery spend confirmed through hand-offs, and food that
+   * expired in the pantry before it was used.
+   */
+  async trends(userId: number, endDay: string, days: number) {
+    const daily = await this.db.query<{ day: string; kcal: number; protein: number; meals: number; takeout: number }>(
+      `SELECT to_char(d, 'YYYY-MM-DD') AS day,
+              coalesce(sum(m.kcal), 0)::float8 AS kcal, coalesce(sum(m.protein), 0)::float8 AS protein,
+              count(m.id)::int AS meals, count(m.id) FILTER (WHERE m.source = 'takeout')::int AS takeout
+         FROM generate_series($2::date - ($3::int - 1), $2::date, interval '1 day') AS d
+         LEFT JOIN meal_logs m ON m.user_id = $1 AND m.eaten_on = d::date
+        GROUP BY d ORDER BY d`,
+      [userId, endDay, days],
+    );
+    const [money] = await this.db.query<{ grocery_usd: number; grocery_orders: number; takeout_orders: number }>(
+      `SELECT coalesce(sum(est_total_usd) FILTER (WHERE kind = 'grocery'), 0)::float8 AS grocery_usd,
+              count(*) FILTER (WHERE kind = 'grocery')::int AS grocery_orders,
+              count(*) FILTER (WHERE kind = 'takeout')::int AS takeout_orders
+         FROM orders WHERE user_id = $1 AND created_at::date BETWEEN $2::date - ($3::int - 1) AND $2::date`,
+      [userId, endDay, days],
+    );
+    const [waste] = await this.db.query<{ items: number; grams: number; usd: number }>(
+      `SELECT count(*)::int AS items, coalesce(sum(p.grams), 0)::float8 AS grams,
+              coalesce(round(sum(p.grams * f.price_per_100g / 100), 2), 0)::float8 AS usd
+         FROM pantry_items p JOIN foods f ON f.id = p.food_id
+        WHERE p.user_id = $1 AND p.expires_at::date BETWEEN $2::date - ($3::int - 1) AND least($2::date, now()::date)`,
+      [userId, endDay, days],
+    );
+    return { daily, money: money!, waste: waste! };
   }
 
   async deleteMealLog(userId: number, id: number) {
@@ -452,6 +535,43 @@ export class Repository {
     );
   }
 
+  // ---- group polls ----------------------------------------------------------------
+  async createPoll(userId: number, token: string, title: string, options: PollOption[]) {
+    await this.db.query(
+      "INSERT INTO polls (token, user_id, title, options, expires_at) VALUES ($1, $2, $3, $4, now() + interval '7 days')",
+      [token, userId, title, JSON.stringify(options)],
+    );
+  }
+
+  async poll(token: string) {
+    const [p] = await this.db.query<{ id: number; title: string; options: PollOption[]; expires_at: string }>(
+      "SELECT id, title, options, expires_at FROM polls WHERE token = $1 AND expires_at > now()",
+      [token],
+    );
+    if (!p) return null;
+    const votes = await this.db.query<{ voter: string; option_id: string }>(
+      "SELECT voter, option_id FROM poll_votes WHERE poll_id = $1 ORDER BY created_at",
+      [p.id],
+    );
+    return { ...p, votes };
+  }
+
+  /** One vote per name per poll; voting again changes it. */
+  async vote(token: string, voter: string, optionId: string) {
+    const [p] = await this.db.query<{ id: number; options: PollOption[] }>(
+      "SELECT id, options FROM polls WHERE token = $1 AND expires_at > now()",
+      [token],
+    );
+    if (!p) return "missing" as const;
+    if (!p.options.some((o) => o.id === optionId)) return "bad-option" as const;
+    await this.db.query(
+      `INSERT INTO poll_votes (poll_id, voter, option_id) VALUES ($1, $2, $3)
+       ON CONFLICT (poll_id, voter) DO UPDATE SET option_id = EXCLUDED.option_id, created_at = now()`,
+      [p.id, voter, optionId],
+    );
+    return "ok" as const;
+  }
+
   async restaurantVisits(userId: number) {
     const rows = await this.db.query<{ restaurant_id: string; n: number }>(
       "SELECT restaurant_id, count(*)::int AS n FROM restaurant_visits WHERE user_id = $1 GROUP BY restaurant_id",
@@ -475,6 +595,18 @@ export interface RestaurantRow {
   open_hour: number;
   close_hour: number;
   attrs: Record<string, boolean>;
+  /** Set by live sources (Google Places); demo rows use a search deep link. */
+  maps_url?: string;
+}
+
+export interface PollOption {
+  id: string;
+  name: string;
+  cuisine: string;
+  priceMin: number;
+  priceMax: number;
+  phone: string;
+  mapsUrl: string;
 }
 
 async function consumePantry(tx: Db, userId: number, foodId: string, grams: number) {

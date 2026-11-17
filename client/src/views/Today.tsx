@@ -2,6 +2,7 @@ import { useEffect, useState, type FormEvent } from "react";
 import { Header } from "../App";
 import { api, type DayLog, type Recipe } from "../api";
 import { Icon } from "../components/Icon";
+import { Trends } from "../components/Trends";
 import { fmt, Plate, SectionHead } from "../components/ui";
 import { useI18n } from "../i18n";
 import { useStore } from "../store";
@@ -11,6 +12,7 @@ export function TodayView() {
   const { t, v, lang } = useI18n();
   const [log, setLog] = useState<DayLog | null>(null);
   const [plan, setPlan] = useState<{ slot: string; recipe: Recipe }[] | null>(null);
+  const [planTotals, setPlanTotals] = useState<{ kcal: number; protein: number } | null>(null);
   const [label, setLabel] = useState("");
   const [kcal, setKcal] = useState("");
 
@@ -41,7 +43,11 @@ export function TodayView() {
             <p className="accent small">{t("today.kcal").toUpperCase()}</p>
             <p className="points"><b>{fmt(log.totals.kcal)}</b> <span>/ {fmt(log.targets.kcal)}</span></p>
           </div>
-          <button className="pill-outline accent" onClick={async () => setPlan((await api.mealPlan()).items)}>
+          <button className="pill-outline accent" onClick={async () => {
+            const p = await api.mealPlan();
+            setPlan(p.items);
+            setPlanTotals({ kcal: p.totalKcal, protein: p.totalProtein });
+          }}>
             <Icon name="box" size={18} /> {t("today.plan")}
           </button>
         </div>
@@ -67,6 +73,7 @@ export function TodayView() {
       {plan && (
         <section>
           <SectionHead title={t("today.plan")} sub={t("today.planSub", { kcal: fmt(s.prefs.dailyKcal) })} />
+          {planTotals && <p className="small muted">{t("today.planTotal", { kcal: fmt(planTotals.kcal), protein: planTotals.protein, targetProtein: s.prefs.proteinG })}</p>}
           <div className="offers-grid">
             {plan.map((p) => (
               <article key={p.slot} className="offer-tile" onClick={() => s.setOpenRecipe(p.recipe.id)}>
@@ -110,6 +117,8 @@ export function TodayView() {
           </div>
         </form>
       </section>
+
+      <Trends />
     </>
   );
 }

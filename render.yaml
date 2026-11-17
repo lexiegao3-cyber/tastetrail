@@ -23,3 +23,5 @@ services:
         sync: false
       - key: INSTACART_API_KEY
         sync: false
+      - key: GOOGLE_PLACES_API_KEY
+        sync: false

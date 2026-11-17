@@ -7,6 +7,7 @@ import { AuthView } from "./views/Auth";
 import { BagView } from "./views/Bag";
 import { GroupView } from "./views/Group";
 import { Handoff } from "./views/Handoff";
+import { Poll } from "./views/Poll";
 import { HomeView } from "./views/Home";
 import { ProfileView } from "./views/Profile";
 import { RecipeView } from "./views/Recipe";
@@ -32,6 +33,7 @@ export default function App() {
   }, [load]);
 
   if (location.pathname.startsWith("/handoff/")) return <Handoff />;
+  if (location.pathname.startsWith("/poll/")) return <Poll />;
   if (checking) return <div className="splash" aria-busy="true" />;
   if (!session) return <AuthView onAuthed={load} />;
   return (

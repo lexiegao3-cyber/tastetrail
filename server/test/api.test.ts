@@ -139,6 +139,41 @@ describe("PlateWise API", () => {
     expect(group.body.items[0].mapsUrl).toContain("google.com/maps/search");
   });
 
+  it("summarizes trends: intake, takeout share and pantry waste", async () => {
+    const h = await signup("trends@example.com");
+    await request(app).put("/api/preferences").set(h).send(prefs).expect(200);
+    await request(app).post("/api/meal-logs").set(h).send({ label: "Burrito", kcal: 900, source: "takeout", day: "2026-03-10" }).expect(201);
+    await request(app).post("/api/meal-logs").set(h).send({ label: "Oats", kcal: 1100, source: "manual", day: "2026-03-10" }).expect(201);
+    await request(app).post("/api/meal-logs").set(h).send({ label: "Salad", kcal: 600, source: "manual", day: "2026-03-12" }).expect(201);
+    const res = await request(app).get("/api/trends").set(h).query({ day: "2026-03-12", days: 7 }).expect(200);
+    expect(res.body.daily).toHaveLength(7);
+    expect(res.body.daily.at(-1).day).toBe("2026-03-12");
+    expect(res.body.summary).toMatchObject({ loggedDays: 2, avgKcal: 1300, daysOnTarget: 1 });
+    expect(res.body.summary.takeoutShare).toBeCloseTo(1 / 3);
+    await request(app).get("/api/trends").set(h).query({ days: 500 }).expect(400);
+  });
+
+  it("runs a shareable group vote without accounts for voters", async () => {
+    const h = await signup("poll@example.com");
+    const option = (id: string, name: string) => ({
+      id, name, cuisine: "hotpot", priceMin: 20, priceMax: 40, phone: "(617) 555-0100", mapsUrl: `https://www.google.com/maps/search/?api=1&query=${id}`,
+    });
+    await request(app).post("/api/group/polls").set(h)
+      .send({ title: "Friday dinner", options: [option("a", "A"), { ...option("b", "B"), mapsUrl: "https://evil.example/phish" }] })
+      .expect(400);
+    const created = await request(app).post("/api/group/polls").set(h)
+      .send({ title: "Friday dinner", options: [option("a", "A"), option("b", "B")] }).expect(201);
+    const token = created.body.token;
+    expect(token).toMatch(/^[\w-]{16}$/);
+    await request(app).post(`/api/polls/${token}/vote`).send({ name: "Mia", optionId: "a" }).expect(204);
+    await request(app).post(`/api/polls/${token}/vote`).send({ name: "Leo", optionId: "a" }).expect(204);
+    await request(app).post(`/api/polls/${token}/vote`).send({ name: "Mia", optionId: "b" }).expect(204); // changes her vote
+    await request(app).post(`/api/polls/${token}/vote`).send({ name: "Mia", optionId: "zzz" }).expect(400);
+    const poll = await request(app).get(`/api/polls/${token}`).expect(200);
+    expect(poll.body.options.map((o: { voters: string[] }) => o.voters)).toEqual([["Leo"], ["Mia"]]);
+    await request(app).get("/api/polls/not-a-token").expect(404);
+  });
+
   it("matches foods by trigram similarity", async () => {
     const res = await request(app).get("/api/foods").query({ q: "chiken brest" });
     expect(res.body.items[0].id).toBe("chicken_breast");

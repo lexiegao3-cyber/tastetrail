@@ -32,8 +32,8 @@ Candidate query, step by step:
 
 1. **Pantry coverage was computed for every recipe that passed the filters**: 75K recipes, 586K joined ingredient rows, a hash of all 1.3M ingredient lines, per request. Coverage is now computed only for a pool of at most 3 × limit recipes. The pool comes from three index walks, each stopping at the limit: pantry foods → recipes using them, popularity order, and primary key order.
 2. **The pantry walk itself fanned out**: five common foods (onion, eggs…) match 31K recipes. Those are pre-ranked by match count and capped at 10 × limit before any per-recipe lookups. A covering index `recipe_ingredients(food_id) INCLUDE (recipe_id)` makes this an index-only scan.
-3. **PostgreSQL's JIT compiler added about 0.9 s** to a query that runs in about 0.3 s, because the planner's cost estimate crossed `jit_above_cost`. JIT is off for the app's connections.
-4. **`random_page_cost = 4`** (the spinning-disk default) made the planner seq-scan 151K rows instead of doing 2,000 primary-key lookups. The app sets 1.1, which suits SSD-backed hosts such as Neon.
+3. **PostgreSQL's JIT compiler added about 0.9 s** to a query that runs in about 0.3 s, because the planner's cost estimate crossed `jit_above_cost`. Migration 0003 turns JIT off for the app's database (`ALTER DATABASE … SET jit = off`).
+4. **`random_page_cost = 4`** (the spinning-disk default) made the planner seq-scan 151K rows instead of doing 2,000 primary-key lookups. The same migration sets 1.1, which suits SSD-backed hosts such as Neon.
 5. **Startup refreshed both materialized views on every boot**, which was slow at this size and reset the visibility map, so index-only scans had to fetch from the heap again. Seeding is now skipped when a hash of the seed data is unchanged. A second boot takes 1.2 s.
 6. The importer finishes with `VACUUM (ANALYZE)` so the covering indexes serve index-only scans immediately.
 

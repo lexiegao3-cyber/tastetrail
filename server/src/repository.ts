@@ -391,6 +391,38 @@ export class Repository {
     return t!;
   }
 
+  /**
+   * Trends over the `days` days ending on `endDay`: daily intake, how many meals
+   * came from takeout, grocery spend confirmed through hand-offs, and food that
+   * expired in the pantry before it was used.
+   */
+  async trends(userId: number, endDay: string, days: number) {
+    const daily = await this.db.query<{ day: string; kcal: number; protein: number; meals: number; takeout: number }>(
+      `SELECT to_char(d, 'YYYY-MM-DD') AS day,
+              coalesce(sum(m.kcal), 0)::float8 AS kcal, coalesce(sum(m.protein), 0)::float8 AS protein,
+              count(m.id)::int AS meals, count(m.id) FILTER (WHERE m.source = 'takeout')::int AS takeout
+         FROM generate_series($2::date - ($3::int - 1), $2::date, interval '1 day') AS d
+         LEFT JOIN meal_logs m ON m.user_id = $1 AND m.eaten_on = d::date
+        GROUP BY d ORDER BY d`,
+      [userId, endDay, days],
+    );
+    const [money] = await this.db.query<{ grocery_usd: number; grocery_orders: number; takeout_orders: number }>(
+      `SELECT coalesce(sum(est_total_usd) FILTER (WHERE kind = 'grocery'), 0)::float8 AS grocery_usd,
+              count(*) FILTER (WHERE kind = 'grocery')::int AS grocery_orders,
+              count(*) FILTER (WHERE kind = 'takeout')::int AS takeout_orders
+         FROM orders WHERE user_id = $1 AND created_at::date BETWEEN $2::date - ($3::int - 1) AND $2::date`,
+      [userId, endDay, days],
+    );
+    const [waste] = await this.db.query<{ items: number; grams: number; usd: number }>(
+      `SELECT count(*)::int AS items, coalesce(sum(p.grams), 0)::float8 AS grams,
+              coalesce(round(sum(p.grams * f.price_per_100g / 100), 2), 0)::float8 AS usd
+         FROM pantry_items p JOIN foods f ON f.id = p.food_id
+        WHERE p.user_id = $1 AND p.expires_at::date BETWEEN $2::date - ($3::int - 1) AND least($2::date, now()::date)`,
+      [userId, endDay, days],
+    );
+    return { daily, money: money!, waste: waste! };
+  }
+
   async deleteMealLog(userId: number, id: number) {
     return (await this.db.query("DELETE FROM meal_logs WHERE id = $1 AND user_id = $2 RETURNING 1", [id, userId])).length > 0;
   }
@@ -503,6 +535,43 @@ export class Repository {
     );
   }
 
+  // ---- group polls ----------------------------------------------------------------
+  async createPoll(userId: number, token: string, title: string, options: PollOption[]) {
+    await this.db.query(
+      "INSERT INTO polls (token, user_id, title, options, expires_at) VALUES ($1, $2, $3, $4, now() + interval '7 days')",
+      [token, userId, title, JSON.stringify(options)],
+    );
+  }
+
+  async poll(token: string) {
+    const [p] = await this.db.query<{ id: number; title: string; options: PollOption[]; expires_at: string }>(
+      "SELECT id, title, options, expires_at FROM polls WHERE token = $1 AND expires_at > now()",
+      [token],
+    );
+    if (!p) return null;
+    const votes = await this.db.query<{ voter: string; option_id: string }>(
+      "SELECT voter, option_id FROM poll_votes WHERE poll_id = $1 ORDER BY created_at",
+      [p.id],
+    );
+    return { ...p, votes };
+  }
+
+  /** One vote per name per poll; voting again changes it. */
+  async vote(token: string, voter: string, optionId: string) {
+    const [p] = await this.db.query<{ id: number; options: PollOption[] }>(
+      "SELECT id, options FROM polls WHERE token = $1 AND expires_at > now()",
+      [token],
+    );
+    if (!p) return "missing" as const;
+    if (!p.options.some((o) => o.id === optionId)) return "bad-option" as const;
+    await this.db.query(
+      `INSERT INTO poll_votes (poll_id, voter, option_id) VALUES ($1, $2, $3)
+       ON CONFLICT (poll_id, voter) DO UPDATE SET option_id = EXCLUDED.option_id, created_at = now()`,
+      [p.id, voter, optionId],
+    );
+    return "ok" as const;
+  }
+
   async restaurantVisits(userId: number) {
     const rows = await this.db.query<{ restaurant_id: string; n: number }>(
       "SELECT restaurant_id, count(*)::int AS n FROM restaurant_visits WHERE user_id = $1 GROUP BY restaurant_id",
@@ -526,6 +595,18 @@ export interface RestaurantRow {
   open_hour: number;
   close_hour: number;
   attrs: Record<string, boolean>;
+  /** Set by live sources (Google Places); demo rows use a search deep link. */
+  maps_url?: string;
+}
+
+export interface PollOption {
+  id: string;
+  name: string;
+  cuisine: string;
+  priceMin: number;
+  priceMax: number;
+  phone: string;
+  mapsUrl: string;
 }
 
 async function consumePantry(tx: Db, userId: number, foodId: string, grams: number) {

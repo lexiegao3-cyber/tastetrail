@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import express from "express";
 import { z } from "zod";
 import { authenticate, hashPassword, issueToken, verifyPassword, type AuthConfig } from "./auth.js";
@@ -5,9 +6,10 @@ import { NEIGHBORHOODS } from "./data/restaurants.js";
 import type { Db } from "./db/index.js";
 import { errorHandler, HttpError } from "./errors.js";
 import { deepLinks, groceryProviders, type GroceryProvider } from "./providers/index.js";
+import { demoRestaurants, googlePlaces, type RestaurantSource } from "./providers/places.js";
 import { rank } from "./ranking/engine.js";
 import { recommendGroup } from "./ranking/group.js";
-import { planDay } from "./ranking/mealplan.js";
+import { planDayIlp } from "./ranking/mealplan.js";
 import { bannedFlags, violatesCombination } from "./ranking/restrictions.js";
 import { Repository, type Preferences } from "./repository.js";
 import {
@@ -98,9 +100,31 @@ const groupBody = z.object({
     .max(30),
   limit: z.number().int().min(1).max(10).default(5),
 });
-const restaurantVisitBody = z.object({ restaurantId: z.string().min(1).max(64), name: z.string().max(120) });
+const restaurantVisitBody = z.object({
+  restaurantId: z.string().min(1).max(300),
+  name: z.string().max(120),
+  mapsUrl: z.url({ protocol: /^https$/, hostname: /(^|\.)google\.com$/ }).optional(),
+});
+const pollBody = z.object({
+  title: z.string().trim().min(1).max(80),
+  options: z
+    .array(z.object({
+      id: z.string().min(1).max(300),
+      name: z.string().min(1).max(120),
+      cuisine: z.string().max(40),
+      priceMin: z.number().min(0).max(1000),
+      priceMax: z.number().min(0).max(1000),
+      phone: z.string().max(40),
+      mapsUrl: z.url({ protocol: /^https$/, hostname: /(^|\.)google\.com$/ }),
+    }))
+    .min(2)
+    .max(8),
+});
+const voteBody = z.object({ name: z.string().trim().min(1).max(40), optionId: z.string().min(1).max(300) });
 
 const today = () => new Date().toISOString().slice(0, 10);
+
+const voteRateLimit = authRateLimit(60, 10 * 60_000);
 
 /** Fixed-window limit on login/register per client IP (in memory; fine for one instance). */
 function authRateLimit(max = 20, windowMs = 15 * 60_000): express.RequestHandler {
@@ -119,8 +143,20 @@ function authRateLimit(max = 20, windowMs = 15 * 60_000): express.RequestHandler
   };
 }
 
-export function createApp(db: Db, authCfg: AuthConfig, providers: Record<GroceryProvider["id"], GroceryProvider> = groceryProviders()) {
+export interface AppOptions {
+  /** Group-dining candidates; defaults to Google Places when GOOGLE_PLACES_API_KEY is set, else the demo rows. */
+  restaurants?: (repo: Repository) => RestaurantSource;
+}
+
+export function createApp(
+  db: Db,
+  authCfg: AuthConfig,
+  providers: Record<GroceryProvider["id"], GroceryProvider> = groceryProviders(),
+  opts: AppOptions = {},
+) {
   const repo = new Repository(db);
+  const placesKey = process.env.GOOGLE_PLACES_API_KEY;
+  const restaurantSource = opts.restaurants?.(repo) ?? (placesKey ? googlePlaces(placesKey) : demoRestaurants(repo));
   const requireAuth = authenticate(authCfg, { required: true });
   const uid = (req: express.Request) => req.userId!;
 
@@ -222,11 +258,14 @@ export function createApp(db: Db, authCfg: AuthConfig, providers: Record<Grocery
     const b = recommendBody.parse(req.body ?? {});
     const prefs = await repo.getPreferences(uid(req));
     const { ranked } = await rankFor(uid(req), prefs, { ...b, hour: 7 }, 30);
-    const plan = planDay(ranked, prefs.dailyKcal, prefs.mealBudget * 3);
+    const { plan, solver } = planDayIlp(ranked, { dailyKcal: prefs.dailyKcal, proteinG: prefs.proteinG, dailyBudget: prefs.mealBudget * 3 });
     res.json({
       items: plan.map((p) => ({ slot: p.slot, recipe: recipeDto(p.pick.recipe), score: p.pick.score })),
       totalKcal: Math.round(plan.reduce((s, p) => s + p.pick.recipe.kcal, 0)),
+      totalProtein: Math.round(plan.reduce((s, p) => s + p.pick.recipe.protein, 0)),
       targetKcal: prefs.dailyKcal,
+      targetProtein: prefs.proteinG,
+      solver,
     });
   });
 
@@ -269,6 +308,27 @@ export function createApp(db: Db, authCfg: AuthConfig, providers: Record<Grocery
     const d = day.optional().parse(req.query.day) ?? today();
     const [items, totals, prefs] = await Promise.all([repo.mealLogs(uid(req), d), repo.dayTotals(uid(req), d), repo.getPreferences(uid(req))]);
     res.json({ day: d, items, totals, targets: { kcal: prefs.dailyKcal, protein: prefs.proteinG, sodiumMg: 2300 } });
+  });
+  app.get("/api/trends", requireAuth, async (req, res) => {
+    const end = day.optional().parse(req.query.day) ?? today();
+    const days = z.coerce.number().int().min(7).max(90).default(14).parse(req.query.days);
+    const [t, prefs] = await Promise.all([repo.trends(uid(req), end, days), repo.getPreferences(uid(req))]);
+    const logged = t.daily.filter((d) => d.meals > 0);
+    const avg = (f: (d: (typeof logged)[number]) => number) => (logged.length ? logged.reduce((s, d) => s + f(d), 0) / logged.length : 0);
+    const meals = t.daily.reduce((s, d) => s + d.meals, 0);
+    res.json({
+      days, end, daily: t.daily,
+      targets: { kcal: prefs.dailyKcal, protein: prefs.proteinG },
+      summary: {
+        loggedDays: logged.length,
+        avgKcal: Math.round(avg((d) => d.kcal)),
+        avgProtein: Math.round(avg((d) => d.protein)),
+        daysOnTarget: logged.filter((d) => Math.abs(d.kcal - prefs.dailyKcal) <= prefs.dailyKcal * 0.1).length,
+        takeoutShare: meals ? t.daily.reduce((s, d) => s + d.takeout, 0) / meals : 0,
+        groceryUsd: t.money.grocery_usd, groceryOrders: t.money.grocery_orders, takeoutOrders: t.money.takeout_orders,
+        wasteItems: t.waste.items, wasteUsd: t.waste.usd,
+      },
+    });
   });
   app.post("/api/meal-logs", requireAuth, async (req, res) => {
     const b = mealLogBody.parse(req.body);
@@ -340,22 +400,57 @@ export function createApp(db: Db, authCfg: AuthConfig, providers: Record<Grocery
   });
 
   // ---- group dining ----------------------------------------------------------------------------
+  const mapsUrlFor = (r: { name: string; maps_url?: string }) => r.maps_url ?? deepLinks.googleMaps(`${r.name} Boston MA`);
+
   app.post("/api/group/recommendations", requireAuth, async (req, res) => {
     const q = groupBody.parse(req.body);
-    const [rows, visits] = await Promise.all([repo.restaurants(), repo.restaurantVisits(uid(req))]);
+    const center = {
+      lat: q.participants.reduce((s, p) => s + p.origin.lat, 0) / q.participants.length,
+      lng: q.participants.reduce((s, p) => s + p.origin.lng, 0) / q.participants.length,
+    };
+    // Radius that the travel limit allows (20 km/h city speed, as in travelMinutes).
+    const radiusM = Math.round((q.maxTravelMinutes / 60) * 20_000);
+    const [rows, visits] = await Promise.all([
+      restaurantSource.search({ cuisine: q.cuisine, center, radiusM }),
+      repo.restaurantVisits(uid(req)),
+    ]);
     const results = recommendGroup(rows, q, visits);
     res.json({
-      items: results.map((r) => ({
-        ...r,
-        mapsUrl: deepLinks.googleMaps(`${r.restaurant.name} Boston MA`),
-      })),
+      source: restaurantSource.id,
+      items: results.map((r) => ({ ...r, mapsUrl: mapsUrlFor(r.restaurant) })),
     });
   });
   app.post("/api/group/visit", requireAuth, async (req, res) => {
-    const { restaurantId, name } = restaurantVisitBody.parse(req.body);
-    const url = deepLinks.googleMaps(`${name} Boston MA`);
+    const { restaurantId, name, mapsUrl } = restaurantVisitBody.parse(req.body);
+    const url = mapsUrl ?? deepLinks.googleMaps(`${name} Boston MA`);
     const intentId = await repo.createIntent(uid(req), "restaurant", "google-maps", url, { label: name, restaurantId });
     res.status(201).json({ url, intentId });
+  });
+
+  // ---- shareable group vote: friends open a link and pick one, no account needed --------
+  app.post("/api/group/polls", requireAuth, async (req, res) => {
+    const b = pollBody.parse(req.body);
+    const token = randomBytes(12).toString("base64url");
+    await repo.createPoll(uid(req), token, b.title, b.options);
+    res.status(201).json({ token, path: `/poll/${token}` });
+  });
+  app.get("/api/polls/:token", async (req, res) => {
+    const p = await repo.poll(String(req.params.token));
+    if (!p) throw new HttpError(404, "This vote has ended or does not exist");
+    const counts = new Map<string, string[]>();
+    for (const v of p.votes) counts.set(v.option_id, [...(counts.get(v.option_id) ?? []), v.voter]);
+    res.json({
+      title: p.title,
+      expiresAt: p.expires_at,
+      options: p.options.map((o) => ({ ...o, voters: counts.get(o.id) ?? [] })),
+    });
+  });
+  app.post("/api/polls/:token/vote", voteRateLimit, async (req, res) => {
+    const { name, optionId } = voteBody.parse(req.body);
+    const r = await repo.vote(String(req.params.token), name.trim(), optionId);
+    if (r === "missing") throw new HttpError(404, "This vote has ended or does not exist");
+    if (r === "bad-option") throw new HttpError(400, "Unknown option");
+    res.status(204).end();
   });
 
   app.use("/api", (_req, _res, next) => next(new HttpError(404, "Not found")));

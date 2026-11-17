@@ -37,11 +37,6 @@ async function pgliteDb(dataDir?: string): Promise<Db> {
 
 function postgresDb(url: string): Db {
   const pool = new pg.Pool({ connectionString: url, max: 10 });
-  // JIT compilation costs more than it saves on these sub-second queries (about
-  // 0.9 s extra on the candidate query at Food.com scale), and the default
-  // random_page_cost (4, for spinning disks) makes the planner pick full scans
-  // over index lookups on SSD-backed hosts such as Neon.
-  pool.on("connect", (c) => void c.query("SET jit = off; SET random_page_cost = 1.1").catch(() => undefined));
   const wrapClient = (c: pg.PoolClient): Db => ({
     query: async <T>(text: string, params: unknown[] = []) => (await c.query(text, params)).rows as T[],
     transaction: (fn) => fn(wrapClient(c)),
@@ -317,6 +312,35 @@ const MIGRATIONS: { id: string; sql: string }[] = [
       CREATE INDEX recipes_cuisine ON recipes(cuisine);
 
       CREATE TABLE app_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+
+      -- JIT compilation costs more than it saves on these sub-second queries (about
+      -- 0.9 s extra on the candidate query at Food.com scale), and the default
+      -- random_page_cost (4, for spinning disks) makes the planner pick full scans
+      -- over index lookups on SSD-backed hosts such as Neon. Applies to new sessions.
+      DO $$ BEGIN EXECUTE format('ALTER DATABASE %I SET jit = off', current_database()); EXECUTE format('ALTER DATABASE %I SET random_page_cost = 1.1', current_database()); EXCEPTION WHEN insufficient_privilege THEN RAISE NOTICE 'planner settings not applied'; END $$;
+    `,
+  },
+  {
+    // Group polls, and visits that may point at a Google place ID (not a demo row).
+    id: "0004_group_polls",
+    sql: `
+      ALTER TABLE restaurant_visits DROP CONSTRAINT restaurant_visits_restaurant_id_fkey;
+      CREATE TABLE polls (
+        id SERIAL PRIMARY KEY,
+        token TEXT NOT NULL UNIQUE,
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        title TEXT NOT NULL,
+        options JSONB NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        expires_at TIMESTAMPTZ NOT NULL
+      );
+      CREATE TABLE poll_votes (
+        poll_id INTEGER NOT NULL REFERENCES polls(id) ON DELETE CASCADE,
+        voter TEXT NOT NULL,
+        option_id TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        PRIMARY KEY (poll_id, voter)
+      );
     `,
   },
 ];

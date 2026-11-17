@@ -180,7 +180,7 @@ export function createApp(db: Db, authCfg: AuthConfig, providers: Record<Grocery
   async function rankFor(userId: number, prefs: Preferences, b: z.infer<typeof recommendBody>, limit: number) {
     const d = b.day ?? today();
     const now = new Date(`${d}T12:00:00Z`);
-    const [cands, history, cf, popularity, intake, pantry] = await Promise.all([
+    const [cands, history, cf, intake, pantry] = await Promise.all([
       repo.candidates(userId, {
         banned: bannedFlags(prefs.restrictions, now),
         equipment: prefs.equipment,
@@ -190,7 +190,6 @@ export function createApp(db: Db, authCfg: AuthConfig, providers: Record<Grocery
       }),
       repo.history(userId),
       repo.itemSimilarity(userId),
-      repo.popularity(),
       repo.dayTotals(userId, d),
       repo.pantry(userId),
     ]);
@@ -200,7 +199,7 @@ export function createApp(db: Db, authCfg: AuthConfig, providers: Record<Grocery
       history,
       intake,
       cf,
-      popularity,
+      popularity: new Map(cands.map((c) => [c.id, c.pop])),
       hour: b.hour ?? new Date().getHours(),
       pantryEmpty: pantry.length === 0,
       limit,
@@ -241,6 +240,8 @@ export function createApp(db: Db, authCfg: AuthConfig, providers: Record<Grocery
     res.json({
       ...recipeDto(r),
       saved: r.saved,
+      source: r.source,
+      quantitiesEstimated: r.quantities_estimated,
       ingredients: r.ingredients,
       takeout: { doordash: deepLinks.doordash(r.title_en), ubereats: deepLinks.ubereats(r.title_en) },
     });

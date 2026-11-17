@@ -93,6 +93,8 @@ export interface Ingredient {
 
 export interface RecipeDetail extends Recipe {
   saved: boolean;
+  source: string;
+  quantitiesEstimated: boolean;
   ingredients: Ingredient[];
   takeout: { doordash: string; ubereats: string };
 }

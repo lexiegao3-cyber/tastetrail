@@ -1,4 +1,5 @@
 import { createReadStream } from "node:fs";
+import { access } from "node:fs/promises";
 import { parse } from "csv-parse";
 import type { Db } from "../db/index.js";
 import { openDatabase, refreshNutrition } from "../db/index.js";
@@ -146,6 +147,9 @@ export function parseRecipeRow(row: Record<string, string>, allCourses = false):
 }
 
 async function* csvRows(file: string): AsyncGenerator<Record<string, string>> {
+  await access(file).catch(() => {
+    throw new Error(`Cannot read ${file}`);
+  });
   const parser = createReadStream(file).pipe(parse({ columns: true, relax_quotes: true, skip_records_with_error: true }));
   for await (const row of parser) yield row as Record<string, string>;
 }

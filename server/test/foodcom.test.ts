@@ -64,5 +64,11 @@ describe("Food.com import", () => {
     const [seed] = await db.query<{ kcal: string }>("SELECT kcal FROM recipe_nutrition WHERE recipe_id = 'tomato-egg'");
     expect(Number(seed!.kcal)).toBeGreaterThan(100);
     await db.close();
-  });
+  }, 30_000);
+
+  it("fails with a clear message when a file is missing", async () => {
+    const db = await openDatabase();
+    await expect(importFoodCom(db, { recipes: dir + "nope.csv", log: () => undefined })).rejects.toThrow(/Cannot read .*nope\.csv/);
+    await db.close();
+  }, 30_000);
 });

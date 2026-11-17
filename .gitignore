@@ -7,3 +7,4 @@ dist/
 pgdata/
 *.csv
 *.tsbuildinfo
+!server/test/fixtures/**/*.csv

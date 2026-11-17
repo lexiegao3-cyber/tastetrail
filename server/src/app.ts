@@ -102,6 +102,23 @@ const restaurantVisitBody = z.object({ restaurantId: z.string().min(1).max(64), 
 
 const today = () => new Date().toISOString().slice(0, 10);
 
+/** Fixed-window limit on login/register per client IP (in memory; fine for one instance). */
+function authRateLimit(max = 20, windowMs = 15 * 60_000): express.RequestHandler {
+  const hits = new Map<string, { count: number; reset: number }>();
+  return (req, _res, next) => {
+    const now = Date.now();
+    const key = req.ip ?? "unknown";
+    const entry = hits.get(key);
+    if (!entry || entry.reset <= now) {
+      if (hits.size > 10_000) for (const [k, v] of hits) if (v.reset <= now) hits.delete(k);
+      hits.set(key, { count: 1, reset: now + windowMs });
+      return next();
+    }
+    if (++entry.count > max) return next(new HttpError(429, "Too many attempts, try again later"));
+    next();
+  };
+}
+
 export function createApp(db: Db, authCfg: AuthConfig, providers: Record<GroceryProvider["id"], GroceryProvider> = groceryProviders()) {
   const repo = new Repository(db);
   const requireAuth = authenticate(authCfg, { required: true });
@@ -109,7 +126,17 @@ export function createApp(db: Db, authCfg: AuthConfig, providers: Record<Grocery
 
   const app = express();
   app.disable("x-powered-by");
+  app.set("trust proxy", 1);
+  app.use((_req, res, next) => {
+    res.set({
+      "X-Content-Type-Options": "nosniff",
+      "Referrer-Policy": "strict-origin-when-cross-origin",
+      "X-Frame-Options": "DENY",
+    });
+    next();
+  });
   app.use(express.json({ limit: "64kb" }));
+  app.use("/api/auth", authRateLimit());
 
   app.get("/api/health", (_req, res) => res.json({ status: "ok" }));
 

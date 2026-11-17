@@ -1,0 +1,25 @@
+# Render Blueprint: one Node web service that serves the API and the built client.
+# Database: set DATABASE_URL to a Postgres connection string (for example Neon's,
+# with ?sslmode=require). Left empty, the app falls back to embedded PGlite on
+# the instance's disk, which is wiped on every deploy or restart (demo only).
+services:
+  - type: web
+    name: platewise
+    runtime: node
+    plan: free
+    buildCommand: >-
+      cd client && npm ci --include=dev && npm run build &&
+      cd ../server && npm ci --include=dev && npm run build
+    startCommand: cd server && npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: NODE_ENV
+        value: production
+      - key: PLATEWISE_JWT_SECRET
+        generateValue: true
+      - key: DATABASE_URL
+        sync: false
+      - key: INSTACART_API_KEY
+        sync: false
